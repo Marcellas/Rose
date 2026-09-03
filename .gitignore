@@ -144,3 +144,15 @@ CMakeUserPresets.json
 .DS_Store
 Thumbs.db
 Desktop.ini
+
+# -----------------------------------------------------------------------------
+# Generated Visual Studio project files
+# -----------------------------------------------------------------------------
+#
+# Rose uses CMake as the authoritative build system. Visual Studio project
+# metadata should be generated from CMake rather than maintained separately.
+
+*.vcxproj
+*.vcxproj.filters
+*.vcxproj.user
+
