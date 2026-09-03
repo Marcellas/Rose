@@ -1,0 +1,146 @@
+# =============================================================================
+# Rose .gitignore
+# =============================================================================
+#
+# Rose is a local-first AI application and may eventually handle highly
+# sensitive information.
+#
+# Runtime memory, model weights, credentials, logs, and user documents must
+# NEVER be committed to the public source repository.
+# =============================================================================
+
+
+# -----------------------------------------------------------------------------
+# Build output
+# -----------------------------------------------------------------------------
+
+/build/
+/out/
+/bin/
+
+cmake-build-*/
+
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+Makefile
+compile_commands.json
+
+
+# -----------------------------------------------------------------------------
+# Visual Studio / MSVC
+# -----------------------------------------------------------------------------
+
+.vs/
+
+*.suo
+*.user
+*.userosscache
+*.sln.docstates
+
+*.VC.db
+*.VC.VC.opendb
+
+Debug/
+Release/
+RelWithDebInfo/
+MinSizeRel/
+
+x64/
+x86/
+
+
+# -----------------------------------------------------------------------------
+# User-specific CMake configuration
+# -----------------------------------------------------------------------------
+#
+# CMakePresets.json MAY be committed because it describes project-wide build
+# presets.
+#
+# CMakeUserPresets.json is intentionally excluded because it is intended for
+# developer-specific machine settings.
+
+CMakeUserPresets.json
+
+
+# -----------------------------------------------------------------------------
+# Compiled files / debugging artifacts
+# -----------------------------------------------------------------------------
+
+*.obj
+*.pdb
+*.ilk
+*.exe
+*.dll
+*.lib
+*.exp
+
+
+# -----------------------------------------------------------------------------
+# Rose model files
+# -----------------------------------------------------------------------------
+#
+# Local model weights can be multiple gigabytes and may have licensing
+# restrictions of their own. They should be downloaded/installed separately.
+
+/models/
+
+
+# -----------------------------------------------------------------------------
+# Rose runtime data
+# -----------------------------------------------------------------------------
+#
+# IMPORTANT:
+# These locations may eventually contain conversations, memories, indexed
+# documents, embeddings, user information, or other private information.
+
+/data/
+/memory/
+/user_data/
+
+
+# -----------------------------------------------------------------------------
+# Logs / crash diagnostics
+# -----------------------------------------------------------------------------
+
+/logs/
+/crash_dumps/
+
+*.log
+*.dmp
+
+
+# -----------------------------------------------------------------------------
+# Credentials / secrets
+# -----------------------------------------------------------------------------
+
+/secrets/
+
+.env
+.env.*
+!.env.example
+
+*.key
+*.pem
+*.pfx
+*.p12
+
+
+# -----------------------------------------------------------------------------
+# Temporary files
+# -----------------------------------------------------------------------------
+
+*.tmp
+*.temp
+*.bak
+*.swp
+*~
+
+
+# -----------------------------------------------------------------------------
+# OS generated files
+# -----------------------------------------------------------------------------
+
+.DS_Store
+Thumbs.db
+Desktop.ini

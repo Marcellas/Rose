@@ -1,0 +1,26 @@
+# =============================================================================
+# Rose Git attributes
+# =============================================================================
+
+# Let Git identify text files while normalizing repository line endings.
+* text=auto
+
+# Keep source files consistent in the repository.
+*.cpp       text eol=lf
+*.h         text eol=lf
+*.hpp       text eol=lf
+*.cmake     text eol=lf
+CMakeLists.txt text eol=lf
+
+*.md        text eol=lf
+*.json      text eol=lf
+*.txt       text eol=lf
+
+# Common binary formats should never undergo line-ending conversion.
+*.png       binary
+*.jpg       binary
+*.jpeg      binary
+*.gif       binary
+*.ico       binary
+*.wav       binary
+*.mp3       binary
