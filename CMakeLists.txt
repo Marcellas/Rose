@@ -44,9 +44,16 @@ add_subdirectory(external/llama.cpp)
 add_executable(Rose
     src/main.cpp
 
+    src/core/RoseCore.h
     src/core/RoseCore.cpp
 
+    src/model/ModelTypes.h
+    src/model/IModelProvider.h
+
+    src/model/EchoModelProvider.h
     src/model/EchoModelProvider.cpp
+
+    src/model/LlamaCppModelProvider.h
     src/model/LlamaCppModelProvider.cpp
 )
 

@@ -5,6 +5,7 @@
 #include <memory>
 #include <stdexcept>
 #include <utility>
+#include <string>
 
 namespace rose::core
 {
@@ -24,14 +25,35 @@ namespace rose::core
         }
     }
 
-    std::string RoseCore::processMessage(const std::string_view message)
+    model::ModelResponse RoseCore::processMessage(
+        const std::string_view message)
     {
-        // RoseCore currently delegates directly to the model.
+        // For now RoseCore converts one user input into one ModelRequest.
         //
-        // This line is intentionally simple. The Agent layer will eventually sit
-        // between RoseCore and the provider and become responsible for reasoning,
-        // retrieval, tool use, and prompt construction.
-        return modelProvider_->generate(message);
+        // This looks slightly more elaborate than our previous direct call, but it
+        // establishes the boundary we'll need for conversation history.
+        //
+        // TODAY:
+        //
+        //     one User message
+        //
+        // SOON:
+        //
+        //     System identity
+        //     previous User message
+        //     previous Assistant response
+        //     current User message
+        //     retrieved memory
+        //     tool results
+        model::ModelRequest request;
+
+        request.messages.push_back(
+            model::ModelMessage{
+                .role = model::ModelRole::User,
+                .content = std::string{message}
+            });
+
+        return modelProvider_->generate(request);
     }
 
 } // namespace rose::core

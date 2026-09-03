@@ -1,7 +1,8 @@
 #pragma once
 
+#include "model/ModelTypes.h"
+
 #include <memory>
-#include <string>
 #include <string_view>
 
 namespace rose::model
@@ -72,7 +73,8 @@ namespace rose::core
         //         ↓
         //     Rose response
         [[nodiscard]]
-        std::string processMessage(std::string_view message);
+        model::ModelResponse processMessage(
+            std::string_view message);
 
     private:
         std::unique_ptr<model::IModelProvider> modelProvider_;

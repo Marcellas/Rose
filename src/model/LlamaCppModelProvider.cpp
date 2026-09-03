@@ -9,6 +9,7 @@
 #include <string>
 #include <utility>
 #include <vector>
+#include <limits>
 
 namespace rose::model
 {
@@ -175,33 +176,77 @@ namespace rose::model
             };
         }
 
+        // modelRoleToLlamaRole()
+// -----------------------------------------------------------------------------
+// Translate Rose's model-independent roles into role names understood by chat
+// templates used through llama.cpp.
+//
+// IMPORTANT:
+// Rose itself should never need to know these raw strings.
+//
+// This translation belongs at the provider boundary.
+        [[nodiscard]]
+        const char* modelRoleToLlamaRole(
+            const ModelRole role)
+        {
+            switch (role)
+            {
+            case ModelRole::System:
+                return "system";
+
+            case ModelRole::User:
+                return "user";
+
+            case ModelRole::Assistant:
+                return "assistant";
+
+            case ModelRole::Tool:
+                return "tool";
+            }
+
+            // Defensive fallback.
+            //
+            // Every currently defined ModelRole is handled above. Reaching this point
+            // therefore means a future enum value was added without updating this
+            // provider.
+            throw std::logic_error{
+                "Unsupported ModelRole in LlamaCppModelProvider."
+            };
+        }
 
         // buildChatPrompt()
-        // -----------------------------------------------------------------------------
-        // Uses the chat template embedded in the GGUF model.
-        //
-        // Different model families expect different control tokens:
-        //
-        //     ChatML
-        //     Mistral
-        //     Gemma
-        //     Llama
-        //     etc.
-        //
-        // Rose should NOT hard-code those formats.
-        //
-        // Instead, the model provider asks llama.cpp for the template stored inside
-        // the model and formats a generic "user" message.
-        //
-        // Later our Message structures will allow system/user/assistant/tool messages
-        // to be supplied here instead of this single-message version.
+// -----------------------------------------------------------------------------
+// Convert Rose's structured ModelRequest into the chat format embedded in the
+// GGUF model.
+//
+// Rose supplies generic messages:
+//
+//     System
+//     User
+//     Assistant
+//     Tool
+//
+// llama.cpp then applies the model-specific template.
+//
+// This is the boundary that allows the same Rose conversation to eventually be
+// sent to Qwen, Llama, Gemma, or another provider without Rose constructing
+// model-specific control tokens itself.
         [[nodiscard]]
         std::string buildChatPrompt(
             const llama_model* model,
-            std::string_view userText)
+            const ModelRequest& request)
         {
+            if (request.messages.empty())
+            {
+                throw std::invalid_argument{
+                    "Cannot build a model prompt from an empty message list."
+                };
+            }
+
             const char* chatTemplate =
-                llama_model_chat_template(model, nullptr);
+                llama_model_chat_template(
+                    model,
+                    nullptr);
 
             if (chatTemplate == nullptr)
             {
@@ -210,21 +255,40 @@ namespace rose::model
                 };
             }
 
-            // llama_chat_message stores raw C string pointers, so this std::string must
-            // remain alive during both calls to llama_chat_apply_template().
-            const std::string userMessage{ userText };
 
-            const llama_chat_message message{
-                "user",
-                userMessage.c_str()
-            };
+            // llama_chat_message does NOT own the strings referenced by role/content.
+            //
+            // The content pointers refer directly to std::strings stored in
+            // request.messages.
+            //
+            // That is safe because:
+            //
+            //     - request is borrowed for this entire function
+            //     - request.messages is not modified
+            //     - therefore the std::string storage does not move during template use
+            std::vector<llama_chat_message> chatMessages;
 
-            // First call: ask llama.cpp how much space the formatted prompt requires.
+            chatMessages.reserve(
+                request.messages.size());
+
+
+            for (const ModelMessage& message : request.messages)
+            {
+                chatMessages.push_back(
+                    llama_chat_message{
+                        modelRoleToLlamaRole(message.role),
+                        message.content.c_str()
+                    });
+            }
+
+
+            // First call:
+            // Ask llama.cpp how large the formatted prompt needs to be.
             const int32_t requiredSize =
                 llama_chat_apply_template(
                     chatTemplate,
-                    &message,
-                    1,
+                    chatMessages.data(),
+                    chatMessages.size(),
                     true,
                     nullptr,
                     0);
@@ -236,16 +300,18 @@ namespace rose::model
                 };
             }
 
-            // Add one spare byte for safety/null termination even though the returned
-            // std::string is constructed from an explicit length.
+
             std::vector<char> buffer(
                 static_cast<std::size_t>(requiredSize) + 1);
 
+
+            // Second call:
+            // Actually format the prompt into our allocated buffer.
             const int32_t written =
                 llama_chat_apply_template(
                     chatTemplate,
-                    &message,
-                    1,
+                    chatMessages.data(),
+                    chatMessages.size(),
                     true,
                     buffer.data(),
                     static_cast<int32_t>(buffer.size()));
@@ -256,6 +322,7 @@ namespace rose::model
                     "llama.cpp failed while formatting the chat prompt."
                 };
             }
+
 
             return std::string{
                 buffer.data(),
@@ -309,13 +376,6 @@ namespace rose::model
                 };
             }
 
-            if (config.maxGeneratedTokens <= 0)
-            {
-                throw std::invalid_argument{
-                    "Maximum generated token count must be greater than zero."
-                };
-            }
-
             // Configure model loading.
             llama_model_params modelParams =
                 llama_model_default_params();
@@ -346,11 +406,44 @@ namespace rose::model
 
 
         [[nodiscard]]
-        std::string generate(std::string_view input)
+        ModelResponse generate(
+            const ModelRequest& request)
         {
-            if (input.empty())
+            if (request.messages.empty())
             {
-                return {};
+                throw std::invalid_argument{
+                    "ModelRequest must contain at least one message."
+                };
+            }
+
+            if (request.maxGeneratedTokens <= 0)
+            {
+                throw std::invalid_argument{
+                    "ModelRequest maxGeneratedTokens must be greater than zero."
+                };
+            }
+
+            if (request.sampling.topK <= 0)
+            {
+                throw std::invalid_argument{
+                    "Sampling topK must be greater than zero."
+                };
+            }
+
+            if (
+                request.sampling.topP <= 0.0f ||
+                request.sampling.topP > 1.0f)
+            {
+                throw std::invalid_argument{
+                    "Sampling topP must be within the range (0, 1]."
+                };
+            }
+
+            if (request.sampling.temperature <= 0.0f)
+            {
+                throw std::invalid_argument{
+                    "Sampling temperature must be greater than zero."
+                };
             }
 
             // ---------------------------------------------------------------------
@@ -358,7 +451,9 @@ namespace rose::model
             // ---------------------------------------------------------------------
 
             const std::string prompt =
-                buildChatPrompt(model.get(), input);
+                buildChatPrompt(
+                    model.get(),
+                    request);
 
 
             // ---------------------------------------------------------------------
@@ -426,7 +521,7 @@ namespace rose::model
             const auto requiredContext =
                 promptTokens.size()
                 + static_cast<std::size_t>(
-                    config.maxGeneratedTokens);
+                    request.maxGeneratedTokens);
 
             if (requiredContext > config.contextSize)
             {
@@ -520,23 +615,26 @@ namespace rose::model
 
             llama_sampler_chain_add(
                 sampler.get(),
-                llama_sampler_init_top_k(20));
+                llama_sampler_init_top_k(
+                    request.sampling.topK);
 
-            llama_sampler_chain_add(
-                sampler.get(),
-                llama_sampler_init_top_p(
-                    0.95f,
-                    1));
+            llama_sampler_init_top_p(
+                request.sampling.topP,
+                1);
 
             llama_sampler_chain_add(
                 sampler.get(),
                 llama_sampler_init_temp(
-                    0.6f));
+                    request.sampling.temperature);
+
+                const std::uint32_t samplerSeed =
+                request.sampling.seed.value_or(
+                    LLAMA_DEFAULT_SEED);
 
             llama_sampler_chain_add(
                 sampler.get(),
                 llama_sampler_init_dist(
-                    LLAMA_DEFAULT_SEED));
+                    samplerSeed));
 
 
             // ---------------------------------------------------------------------
@@ -579,7 +677,7 @@ namespace rose::model
 
             for (
                 std::int32_t generated = 0;
-                generated < config.maxGeneratedTokens;
+                generated < request.maxGeneratedTokens;
                 ++generated)
             {
                 const int decodeResult =
@@ -610,6 +708,8 @@ namespace rose::model
                         vocab,
                         nextToken);
 
+                ++generatedTokenCount;
+
                 // The token we just generated becomes the next model input.
                 batch =
                     llama_batch_get_one(
@@ -617,7 +717,14 @@ namespace rose::model
                         1);
             }
 
-            return response;
+            return ModelResponse{
+                .text = std::move(response),
+                .generatedTokens = generatedTokenCount,
+                .finishReason =
+                reachedEndOfGeneration
+                ? ModelFinishReason::EndOfGeneration
+                : ModelFinishReason::TokenLimit
+            };
         }
 
 
@@ -659,10 +766,10 @@ namespace rose::model
     LlamaCppModelProvider::~LlamaCppModelProvider() = default;
 
 
-    std::string LlamaCppModelProvider::generate(
-        const std::string_view input)
+    ModelResponse LlamaCppModelProvider::generate(
+        const ModelRequest& request)
     {
-        return impl_->generate(input);
+        return impl_->generate(request);
     }
 
 } // namespace rose::model

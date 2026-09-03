@@ -1,51 +1,40 @@
 #pragma once
 
-#include <string>
-#include <string_view>
+#include "model/ModelTypes.h"
 
 namespace rose::model
 {
 
     // IModelProvider
-    // -----------------------------------------------------------------------------
-    // Represents something capable of turning model input into model output.
+    // -------------------------------------------------------------------------
+    // Common interface implemented by every language-model backend Rose can use.
     //
-    // This interface intentionally knows nothing about:
+    // Rose should depend on THIS interface rather than depending directly on:
     //
-    //   - Rose's personality
-    //   - long-term memory
-    //   - tools
-    //   - permissions
-    //   - the avatar
-    //   - application UI
+    //     llama.cpp
+    //     OpenAI
+    //     Ollama
+    //     another future provider
     //
-    // Those capabilities belong to Rose.
-    //
-    // A ModelProvider is only responsible for communicating with a language model.
-    // Later implementations might include:
-    //
-    //   LocalModelProvider
-    //   OpenAIModelProvider
-    //   OllamaModelProvider
-    //   TestModelProvider
-    //
-    // Keeping this boundary small allows Rose to change models without replacing
-    // the rest of her architecture.
+    // This keeps the language model replaceable without changing Rose's memory,
+    // personality, tools, permissions, avatar, or agent architecture.
     class IModelProvider
     {
     public:
         virtual ~IModelProvider() = default;
 
-        // Submit text to the underlying model and return its generated response.
+        // Execute one structured inference request.
         //
-        // std::string_view:
-        //     The provider only borrows the input for the duration of this call.
+        // OWNERSHIP:
         //
-        // std::string:
-        //     The provider returns ownership of the generated response to the
-        //     caller.
+        // request:
+        //     Borrowed for the duration of this call.
+        //
+        // returned ModelResponse:
+        //     Owned by the caller.
         [[nodiscard]]
-        virtual std::string generate(std::string_view input) = 0;
+        virtual ModelResponse generate(
+            const ModelRequest& request) = 0;
     };
 
 } // namespace rose::model

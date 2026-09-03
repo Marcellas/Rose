@@ -25,7 +25,6 @@ int main()
         rose::model::LlamaCppConfig modelConfig{
             .modelPath = "models/Qwen3-8B-Q4_K_M.gguf",
             .contextSize = 4096,
-            .maxGeneratedTokens = 256,
             .gpuLayers = 0
         };
 
@@ -65,13 +64,18 @@ int main()
                 continue;
             }
 
-            const std::string response =
+            const rose::model::ModelResponse response =
                 roseCore.processMessage(input);
 
             std::cout
                 << "Rose: "
-                << response
+                << response.text
                 << "\n\n";
+
+            std::cout
+                << "[Generated tokens: "
+                << response.generatedTokens
+                << "]\n\n";
         }
 
         return 0;
