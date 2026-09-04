@@ -10,6 +10,7 @@
 #include <utility>
 #include <vector>
 #include <limits>
+#include <iostream>
 
 namespace rose::model
 {
@@ -455,6 +456,51 @@ namespace rose::model
                     model.get(),
                     request);
 
+            // -----------------------------------------------------------------------------
+// Temporary model-request diagnostics
+// -----------------------------------------------------------------------------
+//
+// This lets us verify that Rose's structured conversation actually reaches the
+// model provider.
+//
+// Once Rose's logging system exists, these messages will become structured
+// Verbose-level diagnostic events instead of direct console output.
+
+            std::cerr
+                << "\n[Rose debug] Model request contains "
+                << request.messages.size()
+                << " messages:\n";
+
+
+            for (const model::ModelMessage& message : request.messages)
+            {
+                const char* role = "unknown";
+
+                switch (message.role)
+                {
+                case model::ModelRole::System:
+                    role = "system";
+                    break;
+
+                case model::ModelRole::User:
+                    role = "user";
+                    break;
+
+                case model::ModelRole::Assistant:
+                    role = "assistant";
+                    break;
+
+                case model::ModelRole::Tool:
+                    role = "tool";
+                    break;
+                }
+
+
+                std::cerr
+                    << "\n[" << role << "]\n"
+                    << message.content
+                    << '\n';
+            }
 
             // ---------------------------------------------------------------------
             // 2. Tokenize the prompt.
@@ -616,7 +662,7 @@ namespace rose::model
             llama_sampler_chain_add(
                 sampler.get(),
                 llama_sampler_init_top_k(
-                    request.sampling.topK);
+                    request.sampling.topK));
 
             llama_sampler_init_top_p(
                 request.sampling.topP,
@@ -625,106 +671,111 @@ namespace rose::model
             llama_sampler_chain_add(
                 sampler.get(),
                 llama_sampler_init_temp(
-                    request.sampling.temperature);
+                    request.sampling.temperature));
 
                 const std::uint32_t samplerSeed =
                 request.sampling.seed.value_or(
                     LLAMA_DEFAULT_SEED);
 
-            llama_sampler_chain_add(
-                sampler.get(),
-                llama_sampler_init_dist(
-                    samplerSeed));
+                llama_sampler_chain_add(
+                    sampler.get(),
+                    llama_sampler_init_dist(
+                        samplerSeed));
 
 
-            // ---------------------------------------------------------------------
-            // 6. Feed the prompt into the model.
-            // ---------------------------------------------------------------------
+                // ---------------------------------------------------------------------
+                // 6. Feed the prompt into the model.
+                // ---------------------------------------------------------------------
 
-            llama_batch batch =
-                llama_batch_get_one(
-                    promptTokens.data(),
-                    static_cast<int32_t>(promptTokens.size()));
-
-
-            // ---------------------------------------------------------------------
-            // 7. Autoregressive generation loop.
-            // ---------------------------------------------------------------------
-            //
-            // Language models generate ONE TOKEN AT A TIME:
-            //
-            //     prompt
-            //       |
-            //       v
-            //     model
-            //       |
-            //       v
-            //     logits
-            //       |
-            //       v
-            //     sampler chooses token
-            //       |
-            //       +-------> token is appended to output
-            //       |
-            //       +-------> token becomes input for next iteration
-            //
-            // Repeat until:
-            //
-            //     - end-of-generation token
-            //     - maxGeneratedTokens reached
-
-            std::string response;
-
-            for (
-                std::int32_t generated = 0;
-                generated < request.maxGeneratedTokens;
-                ++generated)
-            {
-                const int decodeResult =
-                    llama_decode(
-                        context.get(),
-                        batch);
-
-                if (decodeResult != 0)
-                {
-                    throw std::runtime_error{
-                        "llama.cpp failed while decoding."
-                    };
-                }
-
-                llama_token nextToken =
-                    llama_sampler_sample(
-                        sampler.get(),
-                        context.get(),
-                        -1);
-
-                if (llama_vocab_is_eog(vocab, nextToken))
-                {
-                    break;
-                }
-
-                response +=
-                    tokenToText(
-                        vocab,
-                        nextToken);
-
-                ++generatedTokenCount;
-
-                // The token we just generated becomes the next model input.
-                batch =
+                llama_batch batch =
                     llama_batch_get_one(
-                        &nextToken,
-                        1);
-            }
+                        promptTokens.data(),
+                        static_cast<int32_t>(promptTokens.size()));
 
-            return ModelResponse{
-                .text = std::move(response),
-                .generatedTokens = generatedTokenCount,
-                .finishReason =
-                reachedEndOfGeneration
-                ? ModelFinishReason::EndOfGeneration
-                : ModelFinishReason::TokenLimit
-            };
+
+                // ---------------------------------------------------------------------
+                // 7. Autoregressive generation loop.
+                // ---------------------------------------------------------------------
+
+                std::string response;
+
+                // Number of normal output tokens actually appended to the response.
+                //
+                // Use std::int32_t rather than plain int because ModelResponse also stores
+                // generatedTokens as std::int32_t. Keeping the types identical avoids
+                // unnecessary conversions later.
+                std::int32_t generatedTokenCount{ 0 };
+
+                // Records HOW generation stopped.
+                //
+                // false:
+                //     We exhausted maxGeneratedTokens.
+                //
+                // true:
+                //     The model emitted an end-of-generation token.
+                bool reachedEndOfGeneration{ false };
+
+
+                for (
+                    std::int32_t generated = 0;
+                    generated < request.maxGeneratedTokens;
+                    ++generated)
+                {
+                    const int decodeResult =
+                        llama_decode(
+                            context.get(),
+                            batch);
+
+                    if (decodeResult != 0)
+                    {
+                        throw std::runtime_error{
+                            "llama.cpp failed while decoding."
+                        };
+                    }
+
+
+                    llama_token nextToken =
+                        llama_sampler_sample(
+                            sampler.get(),
+                            context.get(),
+                            -1);
+
+
+                    if (llama_vocab_is_eog(vocab, nextToken))
+                    {
+                        reachedEndOfGeneration = true;
+                        break;
+                    }
+
+
+                    response +=
+                        tokenToText(
+                            vocab,
+                            nextToken);
+
+                    ++generatedTokenCount;
+
+
+                    // The generated token becomes the model input for the next iteration.
+                    batch =
+                        llama_batch_get_one(
+                            &nextToken,
+                            1);
+                }
+
+
+                // ---------------------------------------------------------------------
+                // 8. Return structured generation information.
+                // ---------------------------------------------------------------------
+
+                return ModelResponse{
+                    .text = std::move(response),
+                    .generatedTokens = generatedTokenCount,
+                    .finishReason =
+                        reachedEndOfGeneration
+                            ? ModelFinishReason::EndOfGeneration
+                            : ModelFinishReason::TokenLimit
+                };
         }
 
 

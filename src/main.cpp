@@ -40,6 +40,7 @@ int main()
 
         std::cout << "Rose v0.1\n";
         std::cout << "Local model initialized.\n";
+        std::cout << "Type /clear to clear the conversation.\n";
         std::cout << "Type /quit to exit.\n\n";
 
 
@@ -57,6 +58,16 @@ int main()
             if (input == "/quit")
             {
                 break;
+            }
+
+            if (input == "/clear")
+            {
+                roseCore.clearConversation();
+
+                std::cout
+                    << "Conversation cleared.\n\n";
+
+                continue;
             }
 
             if (input.empty())

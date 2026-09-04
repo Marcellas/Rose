@@ -47,6 +47,9 @@ add_executable(Rose
     src/core/RoseCore.h
     src/core/RoseCore.cpp
 
+    src/conversation/Conversation.h
+    src/conversation/Conversation.cpp
+
     src/model/ModelTypes.h
     src/model/IModelProvider.h
 

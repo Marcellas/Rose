@@ -1,5 +1,6 @@
 #pragma once
 
+#include "conversation/Conversation.h"
 #include "model/ModelTypes.h"
 
 #include <memory>
@@ -14,70 +15,58 @@ namespace rose::core
 {
 
     // RoseCore
-    // -----------------------------------------------------------------------------
-    // Coordinates Rose's high-level application behavior.
+    // -------------------------------------------------------------------------
+    // Coordinates Rose's major runtime systems.
     //
-    // IMPORTANT:
-    // RoseCore is NOT intended to eventually contain every Rose subsystem.
+    // CURRENT OWNERSHIP:
     //
-    // It will coordinate things such as:
+    //     RoseCore
+    //       |
+    //       +-- ModelProvider
+    //       |
+    //       +-- Conversation
+    //
+    // Later RoseCore will coordinate additional independent modules such as:
     //
     //     Agent
     //     Memory
     //     Tools
     //     Permissions
-    //     ModelProvider
     //
-    // but those systems should remain independent modules.
-    //
-    // At this stage RoseCore only coordinates a model provider because that is all
-    // our first vertical slice requires.
+    // RoseCore should remain a coordinator rather than becoming the
+    // implementation of every subsystem.
     class RoseCore
     {
     public:
-        // RoseCore exclusively owns its currently selected model provider.
-        //
-        // unique_ptr communicates that ownership directly:
-        //
-        //     RoseCore creates/receives provider ownership
-        //             ↓
-        //     RoseCore remains responsible for provider lifetime
-        //             ↓
-        //     destroying RoseCore destroys the provider
-        //
-        // If provider lifetime requirements change later, we can revisit this,
-        // but shared_ptr would currently introduce unnecessary shared ownership.
-        explicit RoseCore(std::unique_ptr<model::IModelProvider> modelProvider);
+        explicit RoseCore(
+            std::unique_ptr<model::IModelProvider> modelProvider,
+            conversation::ConversationConfig conversationConfig = {});
 
-        // Convert a user message into Rose's response.
-        //
-        // Today:
-        //
-        //     User message
-        //         ↓
-        //     ModelProvider
-        //         ↓
-        //     Response
-        //
-        // Eventually:
-        //
-        //     User message
-        //         ↓
-        //     Agent
-        //         ↓
-        //     Memory retrieval / planning / tools
-        //         ↓
-        //     Prompt construction
-        //         ↓
-        //     ModelProvider
-        //         ↓
-        //     Rose response
+
         [[nodiscard]]
         model::ModelResponse processMessage(
             std::string_view message);
 
+
+        // Clear only the current working conversation.
+        //
+        // Persistent memories will eventually be a separate subsystem and
+        // should NOT automatically disappear when this is called.
+        void clearConversation() noexcept;
+
+
+        [[nodiscard]]
+        std::size_t conversationMessageCount() const noexcept;
+
+
     private:
+        // RoseCore exclusively owns the active model provider.
         std::unique_ptr<model::IModelProvider> modelProvider_;
+
+        // RoseCore also owns the current interactive conversation.
+        //
+        // Conversation does not know which model provider is active.
+        conversation::Conversation conversation_;
     };
 
 } // namespace rose::core
