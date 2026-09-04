@@ -1,3 +1,7 @@
+#ifdef _WIN32
+#include <Windows.h>
+#endif
+
 #include "core/RoseCore.h"
 #include "model/LlamaCppModelProvider.h"
 
@@ -9,6 +13,26 @@
 
 int main()
 {
+#ifdef _WIN32
+    // -------------------------------------------------------------------------
+    // Windows console UTF-8
+    // -------------------------------------------------------------------------
+    //
+    // Language models emit UTF-8 text. Windows consoles may otherwise interpret
+    // those bytes using a legacy code page, producing output such as:
+    //
+    //     ?Çö
+    //
+    // instead of:
+    //
+    //     —
+    //
+    // This is presentation-layer configuration only. It does not affect model
+    // inference or Rose's internal string representation.
+    SetConsoleOutputCP(CP_UTF8);
+    SetConsoleCP(CP_UTF8);
+#endif
+
     try
     {
         // =====================================================================

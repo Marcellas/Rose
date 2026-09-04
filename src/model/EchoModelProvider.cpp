@@ -31,10 +31,11 @@ namespace rose::model
             response.append(iterator->content);
 
             return ModelResponse{
-                .text = std::move(response),
-                .generatedTokens = 0,
-                .finishReason =
-                    ModelFinishReason::EndOfGeneration
+            .text = std::move(response),
+            .reasoning = {},
+            .generatedTokens = 0,
+            .finishReason =
+            ModelFinishReason::EndOfGeneration
             };
         }
 

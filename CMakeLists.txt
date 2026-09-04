@@ -172,12 +172,13 @@ endif()
 if(MSVC)
 
     target_compile_options(
-        Rose
-        PRIVATE
-            /W4
-            /permissive-
-            /Zc:__cplusplus
-    )
+    Rose
+    PRIVATE
+        /W4
+        /permissive-
+        /Zc:__cplusplus
+        /utf-8
+)
 
 else()
 
@@ -188,5 +189,7 @@ else()
             -Wextra
             -Wpedantic
     )
+
+
 
 endif()

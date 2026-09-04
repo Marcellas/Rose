@@ -7,16 +7,148 @@
 #include <memory>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 #include <limits>
 #include <iostream>
+#include <cctype>
 
 namespace rose::model
 {
 
     namespace
     {
+
+        // ParsedModelOutput
+        // -----------------------------------------------------------------------------
+        // Internal provider-side representation used while translating model-specific
+        // output into Rose's provider-independent ModelResponse.
+        //
+        // This type never escapes LlamaCppModelProvider.cpp.
+        struct ParsedModelOutput
+        {
+            std::string text;
+
+            std::string reasoning;
+        };
+
+        [[nodiscard]]
+        std::string trimCopy(
+            const std::string_view text)
+        {
+            std::size_t begin{ 0 };
+
+            while (
+                begin < text.size()
+                && std::isspace(
+                    static_cast<unsigned char>(text[begin])))
+            {
+                ++begin;
+            }
+
+
+            std::size_t end{ text.size() };
+
+            while (
+                end > begin
+                && std::isspace(
+                    static_cast<unsigned char>(text[end - 1])))
+            {
+                --end;
+            }
+
+
+            return std::string{
+                text.substr(
+                    begin,
+                    end - begin)
+            };
+        }
+
+
+        [[nodiscard]]
+        ParsedModelOutput parseModelOutput(
+            const std::string_view rawOutput)
+        {
+            constexpr std::string_view openingTag{ "<think>" };
+            constexpr std::string_view closingTag{ "</think>" };
+
+
+            std::size_t firstContent{ 0 };
+
+            while (
+                firstContent < rawOutput.size()
+                && std::isspace(
+                    static_cast<unsigned char>(
+                        rawOutput[firstContent])))
+            {
+                ++firstContent;
+            }
+
+
+            // If the model did not begin with a Qwen reasoning wrapper,
+            // treat the entire result as visible assistant text.
+            if (
+                rawOutput.substr(
+                    firstContent,
+                    openingTag.size())
+                != openingTag)
+            {
+                return ParsedModelOutput{
+                    .text = trimCopy(rawOutput),
+                    .reasoning = {}
+                };
+            }
+
+
+            const std::size_t reasoningBegin =
+                firstContent + openingTag.size();
+
+
+            const std::size_t closingPosition =
+                rawOutput.find(
+                    closingTag,
+                    reasoningBegin);
+
+
+            // If generation ended before </think>, preserve what was generated as
+            // reasoning rather than accidentally presenting it as Rose's answer.
+            if (closingPosition == std::string_view::npos)
+            {
+                return ParsedModelOutput{
+                    .text = {},
+                    .reasoning =
+                        trimCopy(
+                            rawOutput.substr(
+                                reasoningBegin))
+                };
+            }
+
+
+            const std::string reasoning =
+                trimCopy(
+                    rawOutput.substr(
+                        reasoningBegin,
+                        closingPosition - reasoningBegin));
+
+
+            const std::size_t answerBegin =
+                closingPosition
+                + closingTag.size();
+
+
+            const std::string visibleText =
+                trimCopy(
+                    rawOutput.substr(
+                        answerBegin));
+
+
+            return ParsedModelOutput{
+                .text = visibleText,
+                .reasoning = reasoning
+            };
+        }
 
         // BackendRuntime
         // -----------------------------------------------------------------------------
@@ -697,7 +829,11 @@ namespace rose::model
                 // 7. Autoregressive generation loop.
                 // ---------------------------------------------------------------------
 
-                std::string response;
+                // Raw provider output.
+                //
+                // This may contain model-specific protocol text such as Qwen's <think> wrapper.
+                // It is parsed before anything becomes part of Rose's normal conversation.
+                std::string rawResponse;
 
                 // Number of normal output tokens actually appended to the response.
                 //
@@ -748,7 +884,7 @@ namespace rose::model
                     }
 
 
-                    response +=
+                    rawResponse +=
                         tokenToText(
                             vocab,
                             nextToken);
@@ -765,11 +901,29 @@ namespace rose::model
 
 
                 // ---------------------------------------------------------------------
-                // 8. Return structured generation information.
+                // 8. Separate model-specific reasoning from the visible response.
+                // ---------------------------------------------------------------------
+                //
+                // Qwen may emit:
+                //
+                //     <think>
+                //     internal reasoning
+                //     </think>
+                //
+                //     Visible answer
+                //
+                // parseModelOutput() converts that provider-specific representation into
+                // Rose's provider-independent text + reasoning fields.
+                ParsedModelOutput parsedOutput =
+                    parseModelOutput(rawResponse);
+
+                // ---------------------------------------------------------------------
+                // 9. Return structured generation information.
                 // ---------------------------------------------------------------------
 
                 return ModelResponse{
-                    .text = std::move(response),
+                    .text = std::move(parsedOutput.text),
+                    .reasoning = std::move(parsedOutput.reasoning),
                     .generatedTokens = generatedTokenCount,
                     .finishReason =
                         reachedEndOfGeneration
