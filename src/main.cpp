@@ -4,12 +4,15 @@
 
 #include "core/RoseCore.h"
 #include "model/LlamaCppModelProvider.h"
+#include "logging/Logger.h"
+#include "model/LlamaLogBridge.h"
 
 #include <exception>
 #include <iostream>
 #include <memory>
 #include <string>
 #include <utility>
+
 
 int main()
 {
@@ -46,6 +49,28 @@ int main()
         // Later this configuration will come from Rose's configuration system
         // instead of being hard-coded here.
 
+        rose::logging::Logger logger{
+    rose::logging::LoggerConfig{
+        .mode = rose::logging::LogMode::Normal
+    }
+        };
+
+
+        // Install llama.cpp logging redirection BEFORE constructing the provider.
+        //
+        // Object declaration order is intentional:
+        //
+        //     logger
+        //     llamaLogBridge
+        //     model provider / RoseCore
+        //
+        // C++ destroys local objects in reverse construction order, so the model and
+        // llama backend disappear before the bridge, and the bridge disappears before
+        // Logger.
+        rose::model::LlamaLogBridge llamaLogBridge{
+            logger
+        };
+
         rose::model::LlamaCppConfig modelConfig{
             .modelPath = "models/Qwen3-8B-Q4_K_M.gguf",
             .contextSize = 4096,
@@ -55,16 +80,19 @@ int main()
         auto modelProvider =
             std::make_unique<
             rose::model::LlamaCppModelProvider>(
-                std::move(modelConfig));
+                modelConfig,
+                logger);
 
         rose::core::RoseCore roseCore{
-            std::move(modelProvider)
+            std::move(modelProvider),
+            logger
         };
 
 
         std::cout << "Rose v0.1\n";
         std::cout << "Local model initialized.\n";
         std::cout << "Type /clear to clear the conversation.\n";
+        std::cout << "Type /log silent|normal|verbose to change logging.\n";
         std::cout << "Type /quit to exit.\n\n";
 
 
@@ -77,6 +105,41 @@ int main()
             if (!std::getline(std::cin, input))
             {
                 break;
+            }
+
+            if (input == "/log silent")
+            {
+                logger.setMode(
+                    rose::logging::LogMode::Silent);
+
+                std::cout
+                    << "Logging mode: Silent.\n\n";
+
+                continue;
+            }
+
+
+            if (input == "/log normal")
+            {
+                logger.setMode(
+                    rose::logging::LogMode::Normal);
+
+                std::cout
+                    << "Logging mode: Normal.\n\n";
+
+                continue;
+            }
+
+
+            if (input == "/log verbose")
+            {
+                logger.setMode(
+                    rose::logging::LogMode::Verbose);
+
+                std::cout
+                    << "Logging mode: Verbose.\n\n";
+
+                continue;
             }
 
             if (input == "/quit")

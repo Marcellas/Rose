@@ -2,7 +2,6 @@
 
 #include "model/IModelProvider.h"
 
-#include <iostream>
 #include <stdexcept>
 #include <string>
 #include <utility>
@@ -13,8 +12,10 @@ namespace rose::core
 
     RoseCore::RoseCore(
         std::unique_ptr<model::IModelProvider> modelProvider,
+        logging::Logger& logger,
         const conversation::ConversationConfig conversationConfig)
         : modelProvider_{ std::move(modelProvider) }
+        , logger_{ logger }
         , conversation_{ conversationConfig }
     {
         if (!modelProvider_)
@@ -60,15 +61,17 @@ namespace rose::core
         //
         // Once our logging subsystem exists, this information will become a
         // structured Verbose-level event instead of console output.
-        std::cerr
-            << "[Rose debug] Stored history messages: "
-            << conversation_.storedMessageCount()
-            << '\n';
+        logger_.debug(
+            "RoseCore",
+            "Stored history messages: "
+            + std::to_string(
+                conversation_.storedMessageCount()));
 
-        std::cerr
-            << "[Rose debug] Working-context messages: "
-            << requestMessages.size()
-            << '\n';
+        logger_.debug(
+            "RoseCore",
+            "Working-context messages: "
+            + std::to_string(
+                requestMessages.size()));
 
 
         // -------------------------------------------------------------------------
@@ -129,10 +132,11 @@ namespace rose::core
             response.text);
 
 
-        std::cerr
-            << "[Rose debug] Stored messages after turn: "
-            << conversation_.storedMessageCount()
-            << '\n';
+        logger_.debug(
+            "RoseCore",
+            "Stored messages after turn: "
+            + std::to_string(
+                conversation_.storedMessageCount()));
 
 
         return response;

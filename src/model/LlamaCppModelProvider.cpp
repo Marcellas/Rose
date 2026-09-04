@@ -1,6 +1,7 @@
 #include "model/LlamaCppModelProvider.h"
 
 #include "llama.h"
+#include "logging/Logger.h"
 
 #include <array>
 #include <filesystem>
@@ -11,8 +12,8 @@
 #include <utility>
 #include <vector>
 #include <limits>
-#include <iostream>
 #include <cctype>
+
 
 namespace rose::model
 {
@@ -465,7 +466,6 @@ namespace rose::model
 
     } // namespace
 
-
     // LlamaCppModelProvider::Impl
     // -----------------------------------------------------------------------------
     // All llama.cpp-specific state lives here.
@@ -484,25 +484,29 @@ namespace rose::model
     // now. That keeps requests independent and makes lifecycle behavior obvious.
     struct LlamaCppModelProvider::Impl
     {
-        explicit Impl(LlamaCppConfig providerConfig)
-            : config{ std::move(providerConfig) }
+        explicit Impl(
+            LlamaCppConfig config,
+            logging::Logger& logger)
+            : config_{ std::move(config) }
+            , logger_{ logger }
         {
-            if (config.modelPath.empty())
+
+            if (config_.modelPath.empty())
             {
                 throw std::invalid_argument{
                     "LlamaCppModelProvider requires a model path."
                 };
             }
 
-            if (!std::filesystem::exists(config.modelPath))
+            if (!std::filesystem::exists(config_.modelPath))
             {
                 throw std::runtime_error{
                     "Model file does not exist: "
-                    + config.modelPath.string()
+                    + config_.modelPath.string()
                 };
             }
 
-            if (config.contextSize == 0)
+            if (config_.contextSize == 0)
             {
                 throw std::invalid_argument{
                     "Model context size must be greater than zero."
@@ -513,7 +517,7 @@ namespace rose::model
             llama_model_params modelParams =
                 llama_model_default_params();
 
-            modelParams.n_gpu_layers = config.gpuLayers;
+            modelParams.n_gpu_layers = config_.gpuLayers;
 
             // NOTE:
             // std::filesystem::path::string() is sufficient for our initial
@@ -522,7 +526,7 @@ namespace rose::model
             // We should explicitly address full Unicode Windows path handling
             // before Rose's file/model configuration becomes user-facing.
             const std::string modelPath =
-                config.modelPath.string();
+                config_.modelPath.string();
 
             model.reset(
                 llama_model_load_from_file(
@@ -598,10 +602,12 @@ namespace rose::model
 // Once Rose's logging system exists, these messages will become structured
 // Verbose-level diagnostic events instead of direct console output.
 
-            std::cerr
-                << "\n[Rose debug] Model request contains "
-                << request.messages.size()
-                << " messages:\n";
+            logger_.debug(
+                "LlamaCppModelProvider",
+                "Model request contains "
+                + std::to_string(
+                    request.messages.size())
+                + " messages.");
 
 
             for (const model::ModelMessage& message : request.messages)
@@ -628,10 +634,12 @@ namespace rose::model
                 }
 
 
-                std::cerr
-                    << "\n[" << role << "]\n"
-                    << message.content
-                    << '\n';
+                logger_.debug(
+                    "LlamaCppModelProvider",
+                    std::string{ "[" }
+                    + role
+                    + "]\n"
+                    + message.content);
             }
 
             // ---------------------------------------------------------------------
@@ -701,7 +709,7 @@ namespace rose::model
                 + static_cast<std::size_t>(
                     request.maxGeneratedTokens);
 
-            if (requiredContext > config.contextSize)
+            if (requiredContext > config_.contextSize)
             {
                 throw std::runtime_error{
                     "Prompt and requested response exceed Rose's configured "
@@ -724,13 +732,13 @@ namespace rose::model
             llama_context_params contextParams =
                 llama_context_default_params();
 
-            contextParams.n_ctx = config.contextSize;
+            contextParams.n_ctx = config_.contextSize;
 
             // For our MVP we permit an entire prompt to enter in one logical batch.
             //
             // Later we'll use smaller batching for better memory/performance
             // control when processing large retrieved contexts.
-            contextParams.n_batch = config.contextSize;
+            contextParams.n_batch = config_.contextSize;
 
             contextParams.no_perf = true;
 
@@ -796,9 +804,11 @@ namespace rose::model
                 llama_sampler_init_top_k(
                     request.sampling.topK));
 
-            llama_sampler_init_top_p(
-                request.sampling.topP,
-                1);
+            llama_sampler_chain_add(
+                sampler.get(),
+                llama_sampler_init_top_p(
+                    request.sampling.topP,
+                    1));
 
             llama_sampler_chain_add(
                 sampler.get(),
@@ -934,19 +944,30 @@ namespace rose::model
 
 
         // -------------------------------------------------------------------------
-        // Member order matters here.
+        // Member order matters.
         //
-        // C++ destroys members in REVERSE declaration order.
+        // Members are constructed in declaration order and destroyed in reverse.
         //
-        // Therefore:
+        // Construction:
+        //     config_
+        //     logger_ reference binding
+        //     backend
+        //     model
         //
-        //     model is destroyed first
-        //     backend is destroyed afterward
+        // Destruction:
+        //     model
+        //     backend
+        //     logger_ reference disappears
+        //     config_
         //
-        // This guarantees llama_model_free() runs while llama.cpp is still active.
+        // This guarantees the llama model is freed before llama_backend_free().
         // -------------------------------------------------------------------------
 
-        LlamaCppConfig config;
+        LlamaCppConfig config_;
+
+        // Borrowed application logger.
+        // main() owns Logger and guarantees that it outlives this provider.
+        logging::Logger& logger_;
 
         BackendRuntime backend;
 
@@ -959,14 +980,15 @@ namespace rose::model
     // =============================================================================
 
     LlamaCppModelProvider::LlamaCppModelProvider(
-        LlamaCppConfig config)
+        LlamaCppConfig config,
+        logging::Logger& logger)
         : impl_{
             std::make_unique<Impl>(
-                std::move(config))
+                std::move(config),
+                logger)
         }
     {
     }
-
 
     LlamaCppModelProvider::~LlamaCppModelProvider() = default;
 

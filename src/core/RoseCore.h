@@ -2,6 +2,7 @@
 
 #include "conversation/Conversation.h"
 #include "model/ModelTypes.h"
+#include "logging/Logger.h"
 
 #include <memory>
 #include <string_view>
@@ -40,6 +41,7 @@ namespace rose::core
     public:
         explicit RoseCore(
             std::unique_ptr<model::IModelProvider> modelProvider,
+            logging::Logger& logger,
             conversation::ConversationConfig conversationConfig = {});
 
 
@@ -67,6 +69,8 @@ namespace rose::core
         //
         // Conversation does not know which model provider is active.
         conversation::Conversation conversation_;
+
+        logging::Logger& logger_;
     };
 
 } // namespace rose::core

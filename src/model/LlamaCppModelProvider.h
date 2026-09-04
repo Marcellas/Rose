@@ -6,6 +6,11 @@
 #include <filesystem>
 #include <memory>
 
+namespace rose::logging
+{
+    class Logger;
+}
+
 namespace rose::model
 {
 
@@ -33,12 +38,12 @@ namespace rose::model
         std::int32_t gpuLayers{ 0 };
     };
 
-
     class LlamaCppModelProvider final : public IModelProvider
     {
     public:
         explicit LlamaCppModelProvider(
-            LlamaCppConfig config);
+            LlamaCppConfig config,
+            rose::logging::Logger& logger);
 
         ~LlamaCppModelProvider() override;
 

@@ -47,6 +47,9 @@ add_executable(Rose
     src/core/RoseCore.h
     src/core/RoseCore.cpp
 
+    src/logging/Logger.h
+    src/logging/Logger.cpp
+    
     src/conversation/Conversation.h
     src/conversation/Conversation.cpp
 
@@ -55,6 +58,9 @@ add_executable(Rose
 
     src/model/EchoModelProvider.h
     src/model/EchoModelProvider.cpp
+
+    src/model/LlamaLogBridge.h
+    src/model/LlamaLogBridge.cpp
 
     src/model/LlamaCppModelProvider.h
     src/model/LlamaCppModelProvider.cpp
