@@ -163,15 +163,57 @@ int main()
                 continue;
             }
 
+            const rose::core::RoseActivityCallback onActivity =
+                [](const rose::core::RoseActivity activity)
+                {
+                    const char* name = "Unknown";
+
+                    switch (activity)
+                    {
+                    case rose::core::RoseActivity::Idle:
+                        name = "Idle";
+                        break;
+
+                    case rose::core::RoseActivity::Listening:
+                        name = "Listening";
+                        break;
+
+                    case rose::core::RoseActivity::Thinking:
+                        name = "Thinking";
+                        break;
+
+                    case rose::core::RoseActivity::Speaking:
+                        name = "Speaking";
+                        break;
+
+                    case rose::core::RoseActivity::Working:
+                        name = "Working";
+                        break;
+
+                    case rose::core::RoseActivity::Notification:
+                        name = "Notification";
+                        break;
+
+                    case rose::core::RoseActivity::Confused:
+                        name = "Confused";
+                        break;
+                    }
+
+                    std::cerr
+                        << "\n[Rose state: "
+                        << name
+                        << "]\n";
+                };
+
             // -------------------------------------------------------------------------
-// Stream Rose's visible response as it is generated.
-// -------------------------------------------------------------------------
-//
-// The callback borrows each text chunk only during this invocation.
-//
-// We immediately write the bytes to stdout and retain nothing here. The model
-// provider separately constructs the complete ModelResponse that RoseCore will
-// commit to Conversation after successful generation.
+            // Stream Rose's visible response as it is generated.
+            // -------------------------------------------------------------------------
+            //
+            // The callback borrows each text chunk only during this invocation.
+            //
+            // We immediately write the bytes to stdout and retain nothing here. The model
+            // provider separately constructs the complete ModelResponse that RoseCore will
+            // commit to Conversation after successful generation.
             bool responseStarted{ false };
 
 
@@ -204,7 +246,8 @@ int main()
             const rose::model::ModelResponse response =
                 roseCore.processMessage(
                     input,
-                    onText);
+                    onText,
+                    onActivity);
 
 
             // Defensive fallback.

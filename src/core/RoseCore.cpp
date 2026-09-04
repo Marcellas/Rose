@@ -29,7 +29,8 @@ namespace rose::core
 
     model::ModelResponse RoseCore::processMessage(
         const std::string_view message,
-        const model::ModelTextCallback& onText)
+        const model::ModelTextCallback& onText,
+        const RoseActivityCallback& onActivity)
     {
         if (message.empty())
         {
@@ -123,43 +124,134 @@ namespace rose::core
 
 
         // -------------------------------------------------------------------------
-        // Generate the assistant response.
+// Generate the assistant response.
+// -------------------------------------------------------------------------
+//
+// Activity flow:
+//
+//     Thinking
+//        |
+//        | first visible streamed text
+//        v
+//     Speaking
+//        |
+//        | response successfully completes
+//        v
+//       Idle
+//
+// The provider still owns inference. RoseCore only translates model activity
+// into provider-independent Rose activity.
+//
+// IMPORTANT:
+// We use streaming when either:
+//
+//     - the frontend wants streamed text, OR
+//     - an activity observer wants to know when Rose begins speaking.
+//
+// The second case matters because detecting the first visible response chunk is
+// what lets Rose transition accurately from Thinking to Speaking.
+        if (onActivity)
+        {
+            onActivity(
+                RoseActivity::Thinking);
+        }
+
+
+        bool speakingStarted{ false };
+
+
+        // -------------------------------------------------------------------------
+        // Forward visible model text.
         // -------------------------------------------------------------------------
         //
-        // If the caller supplied a streaming callback, use the provider's streaming
-        // path. Otherwise retain the traditional complete-response path.
+        // This callback wraps the caller's normal text callback.
         //
-        // Conversation state is committed only after generation succeeds. This
-        // preserves Rose's existing transaction-like behavior.
+        // It has two jobs:
+        //
+        //     1. Detect the first visible piece of assistant output.
+        //     2. Forward that piece unchanged to the actual frontend.
+        //
+        // The callback does not retain the string_view. Its lifetime remains limited to
+        // the provider callback invocation.
+        const model::ModelTextCallback streamedText =
+            [&onText,
+            &onActivity,
+            &speakingStarted](
+                const std::string_view text)
+            {
+                if (
+                    !speakingStarted
+                    && !text.empty())
+                {
+                    speakingStarted = true;
+
+                    if (onActivity)
+                    {
+                        onActivity(
+                            RoseActivity::Speaking);
+                    }
+                }
+
+
+                if (onText)
+                {
+                    onText(text);
+                }
+            };
+
+
         model::ModelResponse response;
 
-        if (onText)
+
+        try
         {
-            response =
-                modelProvider_->generateStreaming(
-                    request,
-                    onText);
+            // Streaming is required not only when the frontend wants text chunks, but
+            // also when Rose needs to detect the first visible chunk for activity
+            // transitions.
+            if (onText || onActivity)
+            {
+                response =
+                    modelProvider_->generateStreaming(
+                        request,
+                        streamedText);
+            }
+            else
+            {
+                response =
+                    modelProvider_->generate(
+                        request);
+            }
+
+
+            // Commit only after generation succeeds.
+            //
+            // Streaming output may already have been shown to the user, but incomplete
+            // or failed responses must not contaminate Conversation history.
+            conversation_.commitTurn(
+                std::move(userText),
+                response.text);
+
+
+            if (onActivity)
+            {
+                onActivity(
+                    RoseActivity::Idle);
+            }
         }
-        else
+        catch (...)
         {
-            response =
-                modelProvider_->generate(
-                    request);
+            // For now Confused represents an operation that failed.
+            //
+            // Later we may separate recoverable confusion from actual Error state, but
+            // keeping one failure state is sufficient for the MVP.
+            if (onActivity)
+            {
+                onActivity(
+                    RoseActivity::Confused);
+            }
+
+            throw;
         }
-
-
-        // Only after successful inference do we permanently add this completed
-        // user/assistant pair to the current Conversation.
-        conversation_.commitTurn(
-            std::move(userText),
-            response.text);
-
-
-        logger_.debug(
-            "RoseCore",
-            "Stored messages after turn: "
-            + std::to_string(
-                conversation_.storedMessageCount()));
 
 
         return response;

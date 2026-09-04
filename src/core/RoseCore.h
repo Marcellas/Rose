@@ -3,6 +3,7 @@
 #include "conversation/Conversation.h"
 #include "model/ModelTypes.h"
 #include "logging/Logger.h"
+#include "core/RoseActivity.h"
 
 #include <memory>
 #include <string_view>
@@ -48,7 +49,8 @@ namespace rose::core
         [[nodiscard]]
         model::ModelResponse processMessage(
             std::string_view message,
-            const model::ModelTextCallback& onText = {});
+            const model::ModelTextCallback& onText = {},
+            const RoseActivityCallback& onActivity = {});
 
 
         // Clear only the current working conversation.
@@ -66,12 +68,15 @@ namespace rose::core
         // RoseCore exclusively owns the active model provider.
         std::unique_ptr<model::IModelProvider> modelProvider_;
 
+        // Borrowed application-wide logger.
+        // main() owns it and guarantees it outlives RoseCore.
+        logging::Logger& logger_;
+
         // RoseCore also owns the current interactive conversation.
         //
         // Conversation does not know which model provider is active.
         conversation::Conversation conversation_;
 
-        logging::Logger& logger_;
     };
 
 } // namespace rose::core
