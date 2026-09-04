@@ -20,6 +20,322 @@ namespace rose::model
 
     namespace
     {
+        // VisibleTextStreamer
+// -----------------------------------------------------------------------------
+// Filters model-specific protocol text while generation is still in progress.
+//
+// Qwen may generate:
+//
+//     <think>
+//     internal reasoning
+//     </think>
+//
+//     Visible response
+//
+// Rose must never stream the reasoning wrapper or its contents to the user.
+//
+// The parser is incremental because token boundaries are arbitrary. llama.cpp
+// might theoretically return:
+//
+//     "<thi"
+//     "nk>"
+//     ...
+//
+// or split "</think>" across multiple generated pieces.
+//
+// This object owns only a few bytes of protocol-detection state. The complete
+// raw model response remains owned separately by generateInternal().
+        class VisibleTextStreamer final
+        {
+        public:
+            explicit VisibleTextStreamer(
+                const ModelTextCallback* callback)
+                : callback_{ callback }
+            {
+            }
+
+
+            void consume(
+                const std::string_view chunk)
+            {
+                if (
+                    callback_ == nullptr
+                    || !(*callback_)
+                    || chunk.empty())
+                {
+                    return;
+                }
+
+
+                switch (state_)
+                {
+                case State::DetectingPrefix:
+                    consumeDetectingPrefix(chunk);
+                    break;
+
+                case State::Reasoning:
+                    consumeReasoning(chunk);
+                    break;
+
+                case State::Visible:
+                    emitVisible(chunk);
+                    break;
+                }
+            }
+
+
+        private:
+            enum class State
+            {
+                DetectingPrefix,
+                Reasoning,
+                Visible
+            };
+
+
+            static constexpr std::string_view openingTag_{
+                "<think>"
+            };
+
+            static constexpr std::string_view closingTag_{
+                "</think>"
+            };
+
+
+            [[nodiscard]]
+            static bool isWhitespace(
+                const char value) noexcept
+            {
+                const unsigned char character =
+                    static_cast<unsigned char>(value);
+
+                return std::isspace(character) != 0;
+            }
+
+
+            void consumeDetectingPrefix(
+                const std::string_view chunk)
+            {
+                pendingProtocol_.append(
+                    chunk.data(),
+                    chunk.size());
+
+
+                std::size_t firstContent{ 0 };
+
+                while (
+                    firstContent < pendingProtocol_.size()
+                    && isWhitespace(
+                        pendingProtocol_[firstContent]))
+                {
+                    ++firstContent;
+                }
+
+
+                const std::string_view candidate{
+                    pendingProtocol_.data() + firstContent,
+                    pendingProtocol_.size() - firstContent
+                };
+
+
+                // We may only have part of "<think>" so far.
+                if (candidate.size() < openingTag_.size())
+                {
+                    if (
+                        openingTag_.substr(
+                            0,
+                            candidate.size())
+                        == candidate)
+                    {
+                        return;
+                    }
+
+
+                    // This cannot become a <think> wrapper. Treat it as ordinary
+                    // visible model output.
+                    state_ = State::Visible;
+
+                    std::string visible =
+                        std::move(pendingProtocol_);
+
+                    pendingProtocol_.clear();
+
+                    emitVisible(visible);
+
+                    return;
+                }
+
+
+                if (
+                    candidate.substr(
+                        0,
+                        openingTag_.size())
+                    == openingTag_)
+                {
+                    state_ = State::Reasoning;
+
+
+                    const std::size_t afterOpeningTag =
+                        firstContent
+                        + openingTag_.size();
+
+
+                    std::string remainder =
+                        pendingProtocol_.substr(
+                            afterOpeningTag);
+
+                    pendingProtocol_.clear();
+
+
+                    if (!remainder.empty())
+                    {
+                        consumeReasoning(remainder);
+                    }
+
+                    return;
+                }
+
+
+                // The response does not use a reasoning wrapper.
+                state_ = State::Visible;
+
+                std::string visible =
+                    std::move(pendingProtocol_);
+
+                pendingProtocol_.clear();
+
+                emitVisible(visible);
+            }
+
+
+            void consumeReasoning(
+                const std::string_view chunk)
+            {
+                pendingProtocol_.append(
+                    chunk.data(),
+                    chunk.size());
+
+
+                const std::size_t closingPosition =
+                    pendingProtocol_.find(
+                        closingTag_);
+
+
+                if (closingPosition != std::string::npos)
+                {
+                    const std::size_t visibleBegin =
+                        closingPosition
+                        + closingTag_.size();
+
+
+                    std::string remainder =
+                        pendingProtocol_.substr(
+                            visibleBegin);
+
+
+                    pendingProtocol_.clear();
+
+                    state_ = State::Visible;
+
+
+                    if (!remainder.empty())
+                    {
+                        emitVisible(remainder);
+                    }
+
+                    return;
+                }
+
+
+                // We do not need to retain the reasoning itself here because
+                // rawResponse already owns the complete generated output.
+                //
+                // Only retain enough trailing bytes to detect a closing tag that may
+                // be divided between two generated token pieces.
+                constexpr std::size_t retainedSuffix =
+                    closingTag_.size() - 1;
+
+
+                if (pendingProtocol_.size() > retainedSuffix)
+                {
+                    pendingProtocol_.erase(
+                        0,
+                        pendingProtocol_.size()
+                        - retainedSuffix);
+                }
+            }
+
+
+            void emitVisible(
+                const std::string_view text)
+            {
+                std::string output;
+
+
+                for (const char character : text)
+                {
+                    // Match the final parseModelOutput() behavior by suppressing
+                    // leading whitespace.
+                    if (!visibleTextStarted_)
+                    {
+                        if (isWhitespace(character))
+                        {
+                            continue;
+                        }
+
+                        visibleTextStarted_ = true;
+
+                        output.push_back(character);
+
+                        continue;
+                    }
+
+
+                    // Do not immediately stream whitespace. Holding it temporarily lets
+                    // us discard final trailing whitespace, while still preserving
+                    // whitespace that occurs inside the actual response.
+                    if (isWhitespace(character))
+                    {
+                        pendingWhitespace_.push_back(
+                            character);
+
+                        continue;
+                    }
+
+
+                    if (!pendingWhitespace_.empty())
+                    {
+                        output += pendingWhitespace_;
+
+                        pendingWhitespace_.clear();
+                    }
+
+
+                    output.push_back(character);
+                }
+
+
+                if (!output.empty())
+                {
+                    (*callback_)(output);
+                }
+            }
+
+
+            const ModelTextCallback* callback_{ nullptr };
+
+            State state_{ State::DetectingPrefix };
+
+            // Small protocol-detection buffer. Reasoning text itself is deliberately
+            // not retained here.
+            std::string pendingProtocol_;
+
+            // Whitespace is delayed until followed by visible content. This prevents a
+            // final newline or spaces from differing from ModelResponse::text.
+            std::string pendingWhitespace_;
+
+            bool visibleTextStarted_{ false };
+        };
 
         // ParsedModelOutput
         // -----------------------------------------------------------------------------
@@ -546,6 +862,28 @@ namespace rose::model
         ModelResponse generate(
             const ModelRequest& request)
         {
+            return generateInternal(
+                request,
+                nullptr);
+        }
+
+
+        ModelResponse generateStreaming(
+            const ModelRequest& request,
+            const ModelTextCallback& onText)
+        {
+            return generateInternal(
+                request,
+                &onText);
+        }
+
+
+    private:
+
+        ModelResponse generateInternal(
+            const ModelRequest& request,
+            const ModelTextCallback* onText)
+        {
             if (request.messages.empty())
             {
                 throw std::invalid_argument{
@@ -593,14 +931,14 @@ namespace rose::model
                     request);
 
             // -----------------------------------------------------------------------------
-// Temporary model-request diagnostics
-// -----------------------------------------------------------------------------
-//
-// This lets us verify that Rose's structured conversation actually reaches the
-// model provider.
-//
-// Once Rose's logging system exists, these messages will become structured
-// Verbose-level diagnostic events instead of direct console output.
+            // Temporary model-request diagnostics
+            // -----------------------------------------------------------------------------
+            //
+            // This lets us verify that Rose's structured conversation actually reaches the
+            // model provider.
+            //
+            // Once Rose's logging system exists, these messages will become structured
+            // Verbose-level diagnostic events instead of direct console output.
 
             logger_.debug(
                 "LlamaCppModelProvider",
@@ -861,6 +1199,11 @@ namespace rose::model
                 //     The model emitted an end-of-generation token.
                 bool reachedEndOfGeneration{ false };
 
+                // Filters model-protocol output before anything reaches Rose's streaming
+                // callback. The final ModelResponse is still constructed from rawResponse.
+                VisibleTextStreamer visibleStreamer{
+                    onText
+                };
 
                 for (
                     std::int32_t generated = 0;
@@ -894,12 +1237,22 @@ namespace rose::model
                     }
 
 
-                    rawResponse +=
-                        tokenToText(
-                            vocab,
-                            nextToken);
+                    const std::string tokenText =
+    tokenToText(
+        vocab,
+        nextToken);
 
-                    ++generatedTokenCount;
+
+// Preserve the complete provider output for final reasoning/text parsing.
+rawResponse += tokenText;
+
+
+// Independently expose only user-visible output through the streaming path.
+visibleStreamer.consume(
+    tokenText);
+
+
+++generatedTokenCount;
 
 
                     // The generated token becomes the model input for the next iteration.
@@ -997,6 +1350,15 @@ namespace rose::model
         const ModelRequest& request)
     {
         return impl_->generate(request);
+    }
+
+    ModelResponse LlamaCppModelProvider::generateStreaming(
+        const ModelRequest& request,
+        const ModelTextCallback& onText)
+    {
+        return impl_->generateStreaming(
+            request,
+            onText);
     }
 
 } // namespace rose::model

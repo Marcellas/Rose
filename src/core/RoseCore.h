@@ -47,7 +47,8 @@ namespace rose::core
 
         [[nodiscard]]
         model::ModelResponse processMessage(
-            std::string_view message);
+            std::string_view message,
+            const model::ModelTextCallback& onText = {});
 
 
         // Clear only the current working conversation.

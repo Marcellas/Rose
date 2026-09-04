@@ -51,6 +51,11 @@ namespace rose::model
         ModelResponse generate(
             const ModelRequest& request) override;
 
+        [[nodiscard]]
+        ModelResponse generateStreaming(
+            const ModelRequest& request,
+            const ModelTextCallback& onText) override;
+
     private:
         struct Impl;
 

@@ -28,7 +28,8 @@ namespace rose::core
 
 
     model::ModelResponse RoseCore::processMessage(
-        const std::string_view message)
+        const std::string_view message,
+        const model::ModelTextCallback& onText)
     {
         if (message.empty())
         {
@@ -121,8 +122,30 @@ namespace rose::core
         };
 
 
-        model::ModelResponse response =
-            modelProvider_->generate(request);
+        // -------------------------------------------------------------------------
+        // Generate the assistant response.
+        // -------------------------------------------------------------------------
+        //
+        // If the caller supplied a streaming callback, use the provider's streaming
+        // path. Otherwise retain the traditional complete-response path.
+        //
+        // Conversation state is committed only after generation succeeds. This
+        // preserves Rose's existing transaction-like behavior.
+        model::ModelResponse response;
+
+        if (onText)
+        {
+            response =
+                modelProvider_->generateStreaming(
+                    request,
+                    onText);
+        }
+        else
+        {
+            response =
+                modelProvider_->generate(
+                    request);
+        }
 
 
         // Only after successful inference do we permanently add this completed

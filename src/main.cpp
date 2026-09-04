@@ -12,6 +12,7 @@
 #include <memory>
 #include <string>
 #include <utility>
+#include <string_view>
 
 
 int main()
@@ -162,13 +163,64 @@ int main()
                 continue;
             }
 
-            const rose::model::ModelResponse response =
-                roseCore.processMessage(input);
+            // -------------------------------------------------------------------------
+// Stream Rose's visible response as it is generated.
+// -------------------------------------------------------------------------
+//
+// The callback borrows each text chunk only during this invocation.
+//
+// We immediately write the bytes to stdout and retain nothing here. The model
+// provider separately constructs the complete ModelResponse that RoseCore will
+// commit to Conversation after successful generation.
+            bool responseStarted{ false };
 
-            std::cout
-                << "Rose: "
-                << response.text
-                << "\n\n";
+
+            const rose::model::ModelTextCallback onText =
+                [&responseStarted](
+                    const std::string_view text)
+                {
+                    if (!responseStarted)
+                    {
+                        std::cout << "Rose: ";
+
+                        responseStarted = true;
+                    }
+
+
+                    // write() is intentional here because the callback gives us an exact
+                    // string_view rather than requiring a null-terminated string.
+                    std::cout.write(
+                        text.data(),
+                        static_cast<std::streamsize>(
+                            text.size()));
+
+
+                    // Normally stdout may buffer text. Flushing here makes each generated
+                    // chunk visible immediately.
+                    std::cout.flush();
+                };
+
+
+            const rose::model::ModelResponse response =
+                roseCore.processMessage(
+                    input,
+                    onText);
+
+
+            // Defensive fallback.
+            //
+            // A provider might return a complete response without invoking the callback.
+            // The default IModelProvider implementation should already invoke it, but this
+            // keeps the console frontend usable even if a future provider misbehaves.
+            if (!responseStarted)
+            {
+                std::cout
+                    << "Rose: "
+                    << response.text;
+            }
+
+
+            std::cout << "\n\n";
 
             std::cout
                 << "[Generated tokens: "

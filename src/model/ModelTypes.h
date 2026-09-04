@@ -4,9 +4,25 @@
 #include <optional>
 #include <string>
 #include <vector>
+#include <functional>
+#include <string_view>
 
 namespace rose::model
 {
+    // -----------------------------------------------------------------------------
+    // ModelTextCallback
+    // -----------------------------------------------------------------------------
+    //
+    // Receives incremental user-visible model text.
+    //
+    // The string_view is borrowed and is valid only for the duration of the
+    // callback invocation. Consumers must copy it if they need to retain it.
+    //
+    // Providers should send visible assistant text through this callback rather
+    // than provider-specific protocol text or reasoning data.
+
+        using ModelTextCallback =
+            std::function<void(std::string_view)>;
 
     // ModelRole
     // -------------------------------------------------------------------------
