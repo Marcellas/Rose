@@ -36,6 +36,18 @@ set(LLAMA_BUILD_SERVER OFF CACHE BOOL "" FORCE)
 
 add_subdirectory(external/llama.cpp)
 
+# ------------------------------------------------------------------------------
+# SDL3
+# ------------------------------------------------------------------------------
+#
+# SDL is vendored as a pinned Git submodule, like llama.cpp.
+#
+# EXCLUDE_FROM_ALL prevents SDL's extra targets from becoming part of Rose's
+# default build unless Rose actually depends on them.
+add_subdirectory(
+    external/SDL
+    EXCLUDE_FROM_ALL
+)
 
 # =============================================================================
 # Rose executable
@@ -50,6 +62,16 @@ add_executable(Rose
     src/logging/Logger.h
     src/logging/Logger.cpp
     
+    src/avatar/AvatarController.h
+    src/avatar/AvatarController.cpp
+   #src/avatar/AvatarSandbox.cpp
+    src/avatar/AvatarState.h
+    src/avatar/ConsoleAvatar.h
+    src/avatar/ConsoleAvatar.cpp
+    src/avatar/IAvatar.h
+    src/avatar/SdlAvatar.h
+    src/avatar/SdlAvatar.cpp
+
     src/conversation/Conversation.h
     src/conversation/Conversation.cpp
 
@@ -65,7 +87,6 @@ add_executable(Rose
     src/model/LlamaCppModelProvider.h
     src/model/LlamaCppModelProvider.cpp
 )
-
 
 # =============================================================================
 # Rose language standard
@@ -92,6 +113,51 @@ set_target_properties(
         CXX_EXTENSIONS OFF
 )
 
+# ------------------------------------------------------------------------------
+# Avatar sandbox
+# ------------------------------------------------------------------------------
+#
+# Small graphical test application used to validate Rose's avatar rendering
+# independently from model inference and the console frontend.
+add_executable(RoseAvatarSandbox
+    src/avatar/AvatarController.h
+    src/avatar/AvatarController.cpp
+
+    src/avatar/AvatarState.h
+    src/avatar/IAvatar.h
+
+    src/avatar/SdlAvatar.h
+    src/avatar/SdlAvatar.cpp
+
+    src/avatar/AvatarSandbox.cpp
+
+    src/core/RoseActivity.h
+)
+
+target_compile_features(
+    RoseAvatarSandbox
+    PRIVATE
+        cxx_std_20
+)
+
+set_target_properties(
+    RoseAvatarSandbox
+    PROPERTIES
+        CXX_EXTENSIONS OFF
+)
+
+target_include_directories(
+    RoseAvatarSandbox
+    PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/src"
+)
+
+
+target_link_libraries(
+    RoseAvatarSandbox
+    PRIVATE
+        SDL3::SDL3
+)
 
 # =============================================================================
 # Include directories
@@ -116,38 +182,19 @@ target_link_libraries(
     Rose
     PRIVATE
         llama
+        SDL3::SDL3
 )
 
 # =============================================================================
 # Runtime dependencies
 # =============================================================================
 #
-# On Windows, llama.cpp builds as one or more DLLs.
+# On Windows, both llama.cpp and SDL may build runtime DLLs.
 #
-# Linking Rose against the "llama" target tells the linker where to find the
-# import library (*.lib), but Windows still needs the actual runtime DLLs when
-# Rose.exe starts.
+# TARGET_RUNTIME_DLLS asks CMake for the DLLs required by each executable and
+# copies them beside that executable after a successful build.
 #
-# CMake's TARGET_RUNTIME_DLLS generator expression collects the DLLs required
-# by Rose's linked targets.
-#
-# After Rose is built, copy those DLLs beside Rose.exe:
-#
-#     build/Debug/
-#         Rose.exe
-#         llama.dll
-#         ggml.dll
-#         ggml-base.dll
-#         ...
-#
-# Keeping runtime dependencies beside the executable means we do NOT need to:
-#
-#     - modify the user's system PATH
-#     - install llama.cpp system-wide
-#     - manually copy DLLs after every build
-#
-# COMMAND_EXPAND_LISTS is important because TARGET_RUNTIME_DLLS can produce
-# multiple files.
+# This keeps Rose self-contained without changing the user's PATH.
 
 if(WIN32)
 
@@ -163,28 +210,51 @@ if(WIN32)
         COMMAND_EXPAND_LISTS
     )
 
+
+    add_custom_command(
+        TARGET RoseAvatarSandbox
+        POST_BUILD
+
+        COMMAND
+            ${CMAKE_COMMAND} -E copy_if_different
+            $<TARGET_RUNTIME_DLLS:RoseAvatarSandbox>
+            $<TARGET_FILE_DIR:RoseAvatarSandbox>
+
+        COMMAND_EXPAND_LISTS
+    )
+
 endif()
+
 
 # =============================================================================
 # Compiler warnings
 # =============================================================================
 #
-# These options apply ONLY to Rose.
+# These policies apply only to Rose-owned targets.
 #
-# We deliberately do not impose Rose's warning policy on third-party code.
-# External libraries frequently have their own warning policies and may produce
-# warnings under /W4 that are irrelevant to Rose itself.
+# Third-party dependencies such as llama.cpp and SDL retain their own compiler
+# settings and warning policies.
 
 if(MSVC)
 
     target_compile_options(
-    Rose
-    PRIVATE
-        /W4
-        /permissive-
-        /Zc:__cplusplus
-        /utf-8
-)
+        Rose
+        PRIVATE
+            /W4
+            /permissive-
+            /Zc:__cplusplus
+            /utf-8
+    )
+
+
+    target_compile_options(
+        RoseAvatarSandbox
+        PRIVATE
+            /W4
+            /permissive-
+            /Zc:__cplusplus
+            /utf-8
+    )
 
 else()
 
@@ -197,5 +267,12 @@ else()
     )
 
 
+    target_compile_options(
+        RoseAvatarSandbox
+        PRIVATE
+            -Wall
+            -Wextra
+            -Wpedantic
+    )
 
 endif()
