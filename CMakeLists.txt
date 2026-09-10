@@ -49,6 +49,80 @@ add_subdirectory(
     EXCLUDE_FROM_ALL
 )
 
+# -----------------------------------------------------------------------------
+# SDL_ttf
+# -----------------------------------------------------------------------------
+#
+# Rose vendors SDL_ttf so text rendering remains reproducible and does not
+# depend on a machine-wide package installation.
+#
+# HarfBuzz remains enabled because proper text shaping will matter once the
+# GUI grows beyond simple English text.
+#
+# PlutoSVG is unnecessary for the current chat UI. Disabling it avoids pulling
+# in color-SVG/emoji rendering dependencies before Rose actually needs them.
+
+set(SDLTTF_VENDORED ON CACHE BOOL "" FORCE)
+set(SDLTTF_SAMPLES OFF CACHE BOOL "" FORCE)
+set(SDLTTF_INSTALL OFF CACHE BOOL "" FORCE)
+set(SDLTTF_PLUTOSVG OFF CACHE BOOL "" FORCE)
+
+add_subdirectory(
+    external/SDL_ttf
+    EXCLUDE_FROM_ALL
+)
+
+# -----------------------------------------------------------------------------
+# SDL_image
+# -----------------------------------------------------------------------------
+#
+# Rose currently uses SDL_image only for PNG avatar/UI textures.
+#
+# SDL_image enables many formats by default. Some, particularly AVIF, pull in
+# large codec dependencies such as dav1d/AOM and may require external build
+# tools such as NASM.
+#
+# Keep Rose's dependency surface deliberately small until another image format
+# is actually needed.
+
+set(SDLIMAGE_VENDORED ON CACHE BOOL "" FORCE)
+
+set(SDLIMAGE_SAMPLES OFF CACHE BOOL "" FORCE)
+set(SDLIMAGE_TESTS OFF CACHE BOOL "" FORCE)
+set(SDLIMAGE_INSTALL OFF CACHE BOOL "" FORCE)
+
+# Formats Rose currently does not need.
+set(SDLIMAGE_ANI OFF CACHE BOOL "" FORCE)
+set(SDLIMAGE_AVIF OFF CACHE BOOL "" FORCE)
+set(SDLIMAGE_BMP OFF CACHE BOOL "" FORCE)
+set(SDLIMAGE_GIF OFF CACHE BOOL "" FORCE)
+set(SDLIMAGE_JPG OFF CACHE BOOL "" FORCE)
+set(SDLIMAGE_JXL OFF CACHE BOOL "" FORCE)
+set(SDLIMAGE_LBM OFF CACHE BOOL "" FORCE)
+set(SDLIMAGE_PCX OFF CACHE BOOL "" FORCE)
+set(SDLIMAGE_PNM OFF CACHE BOOL "" FORCE)
+set(SDLIMAGE_QOI OFF CACHE BOOL "" FORCE)
+set(SDLIMAGE_SVG OFF CACHE BOOL "" FORCE)
+set(SDLIMAGE_TGA OFF CACHE BOOL "" FORCE)
+set(SDLIMAGE_TIF OFF CACHE BOOL "" FORCE)
+set(SDLIMAGE_WEBP OFF CACHE BOOL "" FORCE)
+set(SDLIMAGE_XCF OFF CACHE BOOL "" FORCE)
+set(SDLIMAGE_XPM OFF CACHE BOOL "" FORCE)
+set(SDLIMAGE_XV OFF CACHE BOOL "" FORCE)
+
+# PNG is the only format required by Rose's avatar right now.
+set(SDLIMAGE_PNG ON CACHE BOOL "" FORCE)
+
+# SDL3 itself has a PNG loader, so SDL_image does not need to build and carry
+# a separate vendored libpng + zlib stack for Rose's current requirements.
+set(SDLIMAGE_PNG_LIBPNG OFF CACHE BOOL "" FORCE)
+set(SDLIMAGE_PNG_SAVE OFF CACHE BOOL "" FORCE)
+
+add_subdirectory(
+    external/SDL_image
+    EXCLUDE_FROM_ALL
+)
+
 # =============================================================================
 # Rose executable
 # =============================================================================
@@ -64,13 +138,17 @@ add_executable(Rose
     
     src/avatar/AvatarController.h
     src/avatar/AvatarController.cpp
-   #src/avatar/AvatarSandbox.cpp
     src/avatar/AvatarState.h
     src/avatar/ConsoleAvatar.h
     src/avatar/ConsoleAvatar.cpp
     src/avatar/IAvatar.h
     src/avatar/SdlAvatar.h
     src/avatar/SdlAvatar.cpp
+
+    src/platform/SdlRuntime.h
+    src/platform/SdlRuntime.cpp
+    src/platform/TtfRuntime.h
+    src/platform/TtfRuntime.cpp
 
     src/conversation/Conversation.h
     src/conversation/Conversation.cpp
@@ -86,6 +164,11 @@ add_executable(Rose
 
     src/model/LlamaCppModelProvider.h
     src/model/LlamaCppModelProvider.cpp
+
+    src/ui/ChatBridge.h
+    src/ui/ChatBridge.cpp
+    src/ui/SdlChatWindow.h
+    src/ui/SdlChatWindow.cpp
 )
 
 # =============================================================================
@@ -129,6 +212,9 @@ add_executable(RoseAvatarSandbox
     src/avatar/SdlAvatar.h
     src/avatar/SdlAvatar.cpp
 
+    src/platform/SdlRuntime.h
+    src/platform/SdlRuntime.cpp
+
     src/avatar/AvatarSandbox.cpp
 
     src/core/RoseActivity.h
@@ -157,6 +243,7 @@ target_link_libraries(
     RoseAvatarSandbox
     PRIVATE
         SDL3::SDL3
+        SDL3_image::SDL3_image
 )
 
 # =============================================================================
@@ -183,6 +270,8 @@ target_link_libraries(
     PRIVATE
         llama
         SDL3::SDL3
+        SDL3_ttf::SDL3_ttf
+        SDL3_image::SDL3_image
 )
 
 # =============================================================================

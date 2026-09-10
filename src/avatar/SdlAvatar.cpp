@@ -1,5 +1,11 @@
 #include "avatar/SdlAvatar.h"
 
+#include "platform/SdlRuntime.h"
+#include <SDL3_image/SDL_image.h>
+
+#include <filesystem>
+#include <stdexcept>
+#include <string>
 #include <SDL3/SDL.h>
 
 #include <stdexcept>
@@ -51,20 +57,14 @@ namespace rose::avatar
             SdlRuntime& operator=(const SdlRuntime&) = delete;
         };
 
-
-        SdlRuntime& sdlRuntime()
-        {
-            static SdlRuntime runtime;
-
-            return runtime;
-        }
-
     } // namespace
 
 
     SdlAvatar::SdlAvatar(
+        platform::SdlRuntime& runtime,
         const int width,
         const int height)
+        : runtime_{ runtime }
     {
         if (width <= 0 || height <= 0)
         {
@@ -73,15 +73,8 @@ namespace rose::avatar
             };
         }
 
-
-        // Ensure process-level SDL initialization happens before creating the
-        // window or renderer.
-        (void)sdlRuntime();
-
-
         SDL_Window* rawWindow{ nullptr };
         SDL_Renderer* rawRenderer{ nullptr };
-
 
         const SDL_WindowFlags flags =
             SDL_WINDOW_BORDERLESS
@@ -128,75 +121,112 @@ namespace rose::avatar
             std::memory_order_relaxed);
     }
 
-
-    bool SdlAvatar::processEvents()
+    bool SdlAvatar::handleEvent(
+        const SDL_Event& event)
     {
-        SDL_Event event{};
+        const SDL_WindowID windowId =
+            SDL_GetWindowID(
+                window_.get());
 
 
-        while (SDL_PollEvent(&event))
+        switch (event.type)
         {
-            switch (event.type)
+        case SDL_EVENT_WINDOW_CLOSE_REQUESTED:
+            if (event.window.windowID == windowId)
             {
-            case SDL_EVENT_QUIT:
                 return false;
+            }
+
+            break;
 
 
-            case SDL_EVENT_MOUSE_BUTTON_DOWN:
-                if (event.button.button == SDL_BUTTON_LEFT)
-                {
-                    dragging_ = true;
-
-                    dragStartMouseX_ =
-                        event.button.x;
-
-                    dragStartMouseY_ =
-                        event.button.y;
-
-
-                    SDL_GetWindowPosition(
-                        window_.get(),
-                        &dragStartWindowX_,
-                        &dragStartWindowY_);
-                }
-
-                break;
-
-
-            case SDL_EVENT_MOUSE_BUTTON_UP:
-                if (event.button.button == SDL_BUTTON_LEFT)
-                {
-                    dragging_ = false;
-                }
-
-                break;
-
-
-            case SDL_EVENT_MOUSE_MOTION:
-                if (dragging_)
-                {
-                    const int newX =
-                        dragStartWindowX_
-                        + static_cast<int>(
-                            event.motion.x
-                            - dragStartMouseX_);
-
-
-                    const int newY =
-                        dragStartWindowY_
-                        + static_cast<int>(
-                            event.motion.y
-                            - dragStartMouseY_);
-
-
-                    SDL_SetWindowPosition(
-                        window_.get(),
-                        newX,
-                        newY);
-                }
-
+        case SDL_EVENT_MOUSE_BUTTON_DOWN:
+            // Ignore mouse events belonging to another SDL window.
+            if (event.button.windowID != windowId)
+            {
                 break;
             }
+
+
+            if (event.button.button == SDL_BUTTON_LEFT)
+            {
+                dragging_ = true;
+
+
+                // Global desktop coordinates remain stable while the window moves.
+                SDL_GetGlobalMouseState(
+                    &dragStartGlobalMouseX_,
+                    &dragStartGlobalMouseY_);
+
+
+                SDL_GetWindowPosition(
+                    window_.get(),
+                    &dragStartWindowX_,
+                    &dragStartWindowY_);
+            }
+
+            break;
+
+
+        case SDL_EVENT_MOUSE_BUTTON_UP:
+            if (event.button.windowID != windowId)
+            {
+                break;
+            }
+
+
+            if (event.button.button == SDL_BUTTON_LEFT)
+            {
+                dragging_ = false;
+            }
+
+            break;
+
+
+        case SDL_EVENT_MOUSE_MOTION:
+            if (
+                event.motion.windowID == windowId
+                && dragging_)
+            {
+                float currentGlobalMouseX{
+                    0.0f
+                };
+
+                float currentGlobalMouseY{
+                    0.0f
+                };
+
+
+                SDL_GetGlobalMouseState(
+                    &currentGlobalMouseX,
+                    &currentGlobalMouseY);
+
+
+                const int newX =
+                    dragStartWindowX_
+                    + static_cast<int>(
+                        currentGlobalMouseX
+                        - dragStartGlobalMouseX_);
+
+
+                const int newY =
+                    dragStartWindowY_
+                    + static_cast<int>(
+                        currentGlobalMouseY
+                        - dragStartGlobalMouseY_);
+
+
+                SDL_SetWindowPosition(
+                    window_.get(),
+                    newX,
+                    newY);
+            }
+
+            break;
+
+
+        default:
+            break;
         }
 
 
@@ -314,6 +344,80 @@ namespace rose::avatar
             renderer_.get(),
             &body);
 
+        if (spriteTexture_)
+        {
+            int outputWidth{ 0 };
+            int outputHeight{ 0 };
+
+
+            if (!SDL_GetRenderOutputSize(
+                renderer_.get(),
+                &outputWidth,
+                &outputHeight))
+            {
+                throw std::runtime_error{
+                    std::string{
+                        "Could not query Rose avatar render size: "
+                    }
+                    + SDL_GetError()
+                };
+            }
+
+
+            const float availableWidth =
+                static_cast<float>(
+                    outputWidth);
+
+            const float availableHeight =
+                static_cast<float>(
+                    outputHeight);
+
+
+            // Preserve the original image aspect ratio.
+            const float scale =
+                std::min(
+                    availableWidth / spriteWidth_,
+                    availableHeight / spriteHeight_);
+
+
+            const float renderedWidth =
+                spriteWidth_
+                * scale;
+
+
+            const float renderedHeight =
+                spriteHeight_
+                * scale;
+
+
+            // Center Rose inside the current avatar window.
+            const SDL_FRect destination{
+                (availableWidth - renderedWidth)
+                    * 0.5f,
+
+                (availableHeight - renderedHeight)
+                    * 0.5f,
+
+                renderedWidth,
+
+                renderedHeight
+            };
+
+
+            if (!SDL_RenderTexture(
+                renderer_.get(),
+                spriteTexture_.get(),
+                nullptr,
+                &destination))
+            {
+                throw std::runtime_error{
+                    std::string{
+                        "Could not render Rose avatar texture: "
+                    }
+                    + SDL_GetError()
+                };
+            }
+        }
 
         SDL_RenderPresent(
             renderer_.get());
@@ -339,6 +443,94 @@ namespace rose::avatar
             SDL_DestroyRenderer(
                 renderer);
         }
+    }
+
+    void SdlAvatar::TextureDeleter::operator()(
+        SDL_Texture* texture) const noexcept
+    {
+        if (texture != nullptr)
+        {
+            SDL_DestroyTexture(
+                texture);
+        }
+    }
+
+    void SdlAvatar::loadSprite(
+        const std::filesystem::path& path)
+    {
+        const std::filesystem::path absolutePath =
+            std::filesystem::absolute(
+                path);
+
+
+        if (!std::filesystem::exists(
+            absolutePath))
+        {
+            throw std::runtime_error{
+                std::string{
+                    "Rose avatar image does not exist: "
+                }
+                + absolutePath.string()
+            };
+        }
+
+
+        const std::string pathString =
+            absolutePath.string();
+
+
+        TexturePtr newTexture{
+            IMG_LoadTexture(
+                renderer_.get(),
+                pathString.c_str())
+        };
+
+
+        if (!newTexture)
+        {
+            throw std::runtime_error{
+                std::string{
+                    "Could not load Rose avatar image '"
+                }
+                + pathString
+                + "': "
+                + SDL_GetError()
+            };
+        }
+
+
+        float width{ 0.0f };
+        float height{ 0.0f };
+
+
+        if (!SDL_GetTextureSize(
+            newTexture.get(),
+            &width,
+            &height))
+        {
+            throw std::runtime_error{
+                std::string{
+                    "Could not query Rose avatar texture size: "
+                }
+                + SDL_GetError()
+            };
+        }
+
+
+        // Only replace the existing image after the entire new image has loaded
+        // successfully.
+        //
+        // This gives us a strong exception guarantee: a failed replacement never
+        // destroys the currently usable sprite.
+        spriteTexture_ =
+            std::move(
+                newTexture);
+
+        spriteWidth_ =
+            width;
+
+        spriteHeight_ =
+            height;
     }
 
 } // namespace rose::avatar

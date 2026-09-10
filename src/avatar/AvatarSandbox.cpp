@@ -1,5 +1,8 @@
 #include "avatar/AvatarController.h"
 #include "avatar/SdlAvatar.h"
+#include "platform/SdlRuntime.h"
+
+#include <SDL3/SDL.h>
 
 #include <chrono>
 #include <exception>
@@ -11,11 +14,16 @@ int main()
 {
     try
     {
+        rose::platform::SdlRuntime sdlRuntime;
+
         rose::avatar::SdlAvatar avatar{
+            sdlRuntime,
             320,
             300
         };
 
+        avatar.loadSprite(
+            "assets/avatar/RoseIdle.png");
 
         rose::avatar::AvatarController controller{
             avatar
@@ -59,8 +67,50 @@ int main()
 
         while (running)
         {
-            running =
-                avatar.processEvents();
+            // -------------------------------------------------------------------------
+            // Central SDL event pump
+            // -------------------------------------------------------------------------
+            //
+            // SdlAvatar no longer owns SDL_PollEvent().
+            //
+            // Even this small sandbox follows the same architecture as Rose:
+            //
+            //     application
+            //         |
+            //         +-- SDL_PollEvent()
+            //                 |
+            //                 v
+            //          avatar.handleEvent()
+            SDL_Event event{};
+
+
+            while (SDL_PollEvent(
+                &event))
+            {
+                if (event.type == SDL_EVENT_QUIT)
+                {
+                    running = false;
+
+                    break;
+                }
+
+
+                running =
+                    avatar.handleEvent(
+                        event);
+
+
+                if (!running)
+                {
+                    break;
+                }
+            }
+
+
+            if (!running)
+            {
+                break;
+            }
 
 
             const auto now =
@@ -87,7 +137,6 @@ int main()
             avatar.render();
 
 
-            // Keep the sandbox responsive without consuming a full CPU core.
             std::this_thread::sleep_for(
                 std::chrono::milliseconds{
                     16
