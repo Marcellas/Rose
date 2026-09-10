@@ -121,7 +121,10 @@ namespace rose::model
 
         SamplingConfig sampling{};
 
-        std::int32_t maxGeneratedTokens{ 256 };
+        // Maximum generation budget, not a requested response length.
+        // The model may stop naturally much earlier.
+
+        std::int32_t maxGeneratedTokens{ 768 };
     };
 
 

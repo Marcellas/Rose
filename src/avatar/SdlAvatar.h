@@ -5,6 +5,9 @@
 #include <atomic>
 #include <memory>
 #include <filesystem>
+#include <chrono>
+#include <cstdint>
+#include <vector>
 
 struct SDL_Window;
 struct SDL_Renderer;
@@ -97,6 +100,37 @@ public:
 
 private:
 
+    struct RenderedSpritePose
+    {
+        float x{ 0.0f };
+        float y{ 0.0f };
+        float width{ 0.0f };
+        float height{ 0.0f };
+
+        double rotationDegrees{ 0.0 };
+
+        bool valid{ false };
+    };
+
+    struct AvatarTransform
+    {
+        float offsetX{ 0.0f };
+        float offsetY{ 0.0f };
+
+        float scale{ 1.0f };
+
+        double rotationDegrees{ 0.0 };
+    };
+
+    // Calculates a lightweight presentation transform for the current state.
+    //
+    // This is pure presentation logic. RoseCore still only reports semantic
+    // activity states and knows nothing about animation.
+    [[nodiscard]]
+    AvatarTransform calculateTransform(
+        AvatarState state,
+        float elapsedSeconds) const;
+
     struct TextureDeleter
     {
         void operator()(
@@ -147,7 +181,39 @@ private:
     RendererPtr renderer_;
 
 private:
+    // One byte of alpha per original sprite pixel.
+    //
+    // This stays on the CPU so mouse hit-testing does not require reading texture
+    // data back from the GPU.
+    std::vector<std::uint8_t> spriteAlpha_;
 
+    int spritePixelWidth_{ 0 };
+    int spritePixelHeight_{ 0 };
+
+
+    // Last pose actually submitted to the renderer.
+    //
+    // Mouse interaction occurs on the same SDL/main thread, so this does not
+    // require synchronization.
+    RenderedSpritePose renderedPose_;
+
+    [[nodiscard]]
+    bool isSpritePixelAt(
+        float windowX,
+        float windowY) const noexcept;
+
+    // Animation timing is owned entirely by the SDL/main thread.
+    //
+    // setState() may be called from Rose's worker, but render() detects the state
+    // transition and resets the animation epoch safely on the UI thread.
+    AvatarState lastRenderedState_{
+        AvatarState::Idle
+    };
+
+
+    std::chrono::steady_clock::time_point animationStart_{
+        std::chrono::steady_clock::now()
+    };
     // -----------------------------------------------------------------------------
     // Window dragging
     // -----------------------------------------------------------------------------

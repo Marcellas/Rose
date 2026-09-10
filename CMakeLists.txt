@@ -6,6 +6,18 @@ project(
     LANGUAGES CXX
 )
 
+# -----------------------------------------------------------------------------
+# llama.cpp GPU acceleration
+# -----------------------------------------------------------------------------
+#
+# Rose's primary development machine has an NVIDIA GPU, so enable llama.cpp's
+# CUDA backend.
+#
+# This affects llama.cpp only. Rose's ModelProvider abstraction remains
+# independent of CUDA, so a future CPU/local/cloud provider does not inherit
+# an NVIDIA dependency at the architecture level.
+
+set(GGML_CUDA ON CACHE BOOL "" FORCE)
 
 # =============================================================================
 # llama.cpp
@@ -34,7 +46,8 @@ set(LLAMA_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
 set(LLAMA_BUILD_TOOLS OFF CACHE BOOL "" FORCE)
 set(LLAMA_BUILD_SERVER OFF CACHE BOOL "" FORCE)
 
-add_subdirectory(external/llama.cpp)
+add_subdirectory(external/llama.cpp
+    EXCLUDE_FROM_ALL)
 
 # ------------------------------------------------------------------------------
 # SDL3

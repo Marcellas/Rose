@@ -151,7 +151,12 @@ int main()
 
                         .contextSize = 4096,
 
-                        .gpuLayers = 0
+                        // Request more GPU layers than this model can possibly contain.
+                        //
+                        // llama.cpp will therefore place all available model layers on the GPU.
+                        // Using a deliberately large value avoids coupling Rose to the exact layer
+                        // count of Qwen3-8B and also works when we swap models later.
+                        .gpuLayers = 999
                     };
 
 

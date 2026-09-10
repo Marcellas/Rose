@@ -119,7 +119,6 @@ namespace rose::core
         model::ModelRequest request{
             .messages = std::move(requestMessages),
             .sampling = {},
-            .maxGeneratedTokens = 256
         };
 
 
