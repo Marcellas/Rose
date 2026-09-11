@@ -780,6 +780,108 @@ namespace rose::model
             };
         }
 
+        // -----------------------------------------------------------------------------
+// tokenizePrompt()
+// -----------------------------------------------------------------------------
+//
+// Converts the fully formatted model prompt into the exact llama token sequence
+// that will be submitted for inference.
+//
+// IMPORTANT:
+//
+// Both inspectContext() and generateInternal() use this helper.
+//
+// That guarantees Rose's context-budget calculation uses the same tokenizer,
+// special-token behavior, and vocabulary as actual generation.
+        [[nodiscard]]
+        std::vector<llama_token> tokenizePrompt(
+            const llama_model* model,
+            const std::string_view prompt)
+        {
+            if (model == nullptr)
+            {
+                throw std::invalid_argument{
+                    "Cannot tokenize a prompt without a loaded llama model."
+                };
+            }
+
+
+            const llama_vocab* vocab =
+                llama_model_get_vocab(
+                    model);
+
+
+            if (vocab == nullptr)
+            {
+                throw std::runtime_error{
+                    "Could not retrieve the model vocabulary."
+                };
+            }
+
+
+            // Asking llama.cpp to tokenize into a zero-sized buffer returns the
+            // required token capacity as a negative value.
+            const int32_t tokenCountResult =
+                llama_tokenize(
+                    vocab,
+                    prompt.data(),
+                    static_cast<int32_t>(
+                        prompt.size()),
+                    nullptr,
+                    0,
+                    true,
+                    true);
+
+
+            if (tokenCountResult >= 0)
+            {
+                throw std::runtime_error{
+                    "Unexpected token-count result from llama.cpp."
+                };
+            }
+
+
+            const std::size_t requiredTokenCount =
+                static_cast<std::size_t>(
+                    -tokenCountResult);
+
+
+            std::vector<llama_token> tokens(
+                requiredTokenCount);
+
+
+            const int32_t actualTokenCount =
+                llama_tokenize(
+                    vocab,
+                    prompt.data(),
+                    static_cast<int32_t>(
+                        prompt.size()),
+                    tokens.data(),
+                    static_cast<int32_t>(
+                        tokens.size()),
+                    true,
+                    true);
+
+
+            if (actualTokenCount < 0)
+            {
+                throw std::runtime_error{
+                    "llama.cpp failed to tokenize the prompt."
+                };
+            }
+
+
+            // Usually actualTokenCount == requiredTokenCount, but resizing to the
+            // returned value makes the vector authoritative if llama.cpp ever returns
+            // fewer tokens than the capacity requested.
+            tokens.resize(
+                static_cast<std::size_t>(
+                    actualTokenCount));
+
+
+            return tokens;
+        }
+
     } // namespace
 
     // LlamaCppModelProvider::Impl
@@ -857,6 +959,58 @@ namespace rose::model
             }
         }
 
+        [[nodiscard]]
+        ModelContextUsage inspectContext(
+            const ModelRequest& request) const
+        {
+            if (request.messages.empty())
+            {
+                throw std::invalid_argument{
+                    "ModelRequest must contain at least one message."
+                };
+            }
+
+
+            if (request.maxGeneratedTokens <= 0)
+            {
+                throw std::invalid_argument{
+                    "ModelRequest maxGeneratedTokens must be greater than zero."
+                };
+            }
+
+
+            // Use the exact same GGUF chat template used during generation.
+            const std::string prompt =
+                buildChatPrompt(
+                    model.get(),
+                    request);
+
+
+            // And the exact same llama tokenizer used during generation.
+            const std::vector<llama_token> promptTokens =
+                tokenizePrompt(
+                    model.get(),
+                    prompt);
+
+
+            // Rose's current configured contexts are tiny compared with INT32_MAX.
+            //
+            // If we ever support context sizes beyond that, ModelContextUsage itself
+            // should move to a wider integer representation rather than silently
+            // truncating here.
+            return ModelContextUsage{
+                .promptTokens =
+                    static_cast<std::int32_t>(
+                        promptTokens.size()),
+
+                .contextCapacity =
+                    static_cast<std::int32_t>(
+                        config_.contextSize),
+
+                .requestedGenerationTokens =
+                    request.maxGeneratedTokens
+            };
+        }
 
         [[nodiscard]]
         ModelResponse generate(
@@ -984,56 +1138,29 @@ namespace rose::model
             // 2. Tokenize the prompt.
             // ---------------------------------------------------------------------
 
+            std::vector<llama_token> promptTokens =
+                    tokenizePrompt(
+                    model.get(),
+                    prompt);
+
+
+            // Generation still needs access to the vocabulary for:
+            //
+            //     llama_vocab_is_eog()
+            //     tokenToText()
+            //
+            // tokenizePrompt() retrieves it internally for tokenization, but it
+            // does not expose that pointer because the helper's responsibility
+            // is only to return the token sequence.
             const llama_vocab* vocab =
-                llama_model_get_vocab(model.get());
+                llama_model_get_vocab(
+                    model.get());
+
 
             if (vocab == nullptr)
             {
                 throw std::runtime_error{
                     "Could not retrieve the model vocabulary."
-                };
-            }
-
-            // Supplying no destination buffer asks llama.cpp to report how many
-            // tokens are required. The required capacity is returned as a negative
-            // value.
-            const int32_t tokenCountResult =
-                llama_tokenize(
-                    vocab,
-                    prompt.data(),
-                    static_cast<int32_t>(prompt.size()),
-                    nullptr,
-                    0,
-                    true,
-                    true);
-
-            if (tokenCountResult >= 0)
-            {
-                throw std::runtime_error{
-                    "Unexpected token-count result from llama.cpp."
-                };
-            }
-
-            const auto promptTokenCount =
-                static_cast<std::size_t>(-tokenCountResult);
-
-            std::vector<llama_token> promptTokens(
-                promptTokenCount);
-
-            const int32_t actualTokenCount =
-                llama_tokenize(
-                    vocab,
-                    prompt.data(),
-                    static_cast<int32_t>(prompt.size()),
-                    promptTokens.data(),
-                    static_cast<int32_t>(promptTokens.size()),
-                    true,
-                    true);
-
-            if (actualTokenCount < 0)
-            {
-                throw std::runtime_error{
-                    "llama.cpp failed to tokenize the prompt."
                 };
             }
 
@@ -1327,7 +1454,6 @@ visibleStreamer.consume(
         ModelPtr model{ nullptr };
     };
 
-
     // =============================================================================
     // LlamaCppModelProvider public interface
     // =============================================================================
@@ -1345,6 +1471,13 @@ visibleStreamer.consume(
 
     LlamaCppModelProvider::~LlamaCppModelProvider() = default;
 
+    ModelContextUsage
+        LlamaCppModelProvider::inspectContext(
+            const ModelRequest& request) const
+    {
+        return impl_->inspectContext(
+            request);
+    }
 
     ModelResponse LlamaCppModelProvider::generate(
         const ModelRequest& request)

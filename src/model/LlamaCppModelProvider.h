@@ -48,6 +48,10 @@ namespace rose::model
         ~LlamaCppModelProvider() override;
 
         [[nodiscard]]
+        ModelContextUsage inspectContext(
+            const ModelRequest& request) const override;
+
+        [[nodiscard]]
         ModelResponse generate(
             const ModelRequest& request) override;
 

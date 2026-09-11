@@ -25,6 +25,9 @@ namespace rose::model
         virtual ModelResponse generate(
             const ModelRequest& request) = 0;
 
+        [[nodiscard]]
+        virtual ModelContextUsage inspectContext(
+            const ModelRequest& request) const = 0;
 
         // Streaming generation.
         //
@@ -42,6 +45,7 @@ namespace rose::model
         // Keeping this fallback here means EchoModelProvider and future simple
         // providers do not need duplicate implementations merely to satisfy the
         // interface.
+
         [[nodiscard]]
         virtual ModelResponse generateStreaming(
             const ModelRequest& request,

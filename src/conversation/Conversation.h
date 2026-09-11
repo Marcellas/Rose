@@ -27,17 +27,25 @@ namespace rose::conversation
     // maxWorkingMessages only controls the last category.
     struct ConversationConfig
     {
-        // Number of PREVIOUS messages retained in the immediate model context.
+        // Maximum number of PREVIOUS messages offered as candidate working
+        // context before RoseCore applies the model's exact token budget.
         //
         // Since a normal turn contains:
         //
         //     User
         //     Assistant
         //
-        // a value of 12 represents roughly six completed turns.
+        // a value of 64 represents at most roughly 32 completed turns.
+        //
+        // This is NOT the final number of messages sent to the model.
+        // RoseCore may remove older complete turns until the provider reports
+        // that:
+        //
+        //     prompt tokens + response reserve <= model context capacity
         //
         // The current user's new message is added separately by RoseCore.
-        std::size_t maxWorkingMessages{ 12 };
+
+        std::size_t maxWorkingMessages{ 64 };
     };
 
 
@@ -55,7 +63,7 @@ namespace rose::conversation
     //
     //     - Perform inference
     //     - Store long-term memories
-    //     - Write anything to disk yet
+    //     - Perform persistence itself
     //     - Decide Rose's personality
     //     - Know anything about llama.cpp
     //

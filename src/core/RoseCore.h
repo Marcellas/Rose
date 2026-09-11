@@ -8,6 +8,11 @@
 #include <memory>
 #include <string_view>
 
+namespace rose::persistence
+{
+    class IConversationStore;
+}
+
 namespace rose::model
 {
     class IModelProvider;
@@ -43,7 +48,8 @@ namespace rose::core
         explicit RoseCore(
             std::unique_ptr<model::IModelProvider> modelProvider,
             logging::Logger& logger,
-            conversation::ConversationConfig conversationConfig = {});
+            persistence::IConversationStore& conversationStore,
+            conversation::ConversationConfig config = {});
 
 
         [[nodiscard]]
@@ -57,7 +63,7 @@ namespace rose::core
         //
         // Persistent memories will eventually be a separate subsystem and
         // should NOT automatically disappear when this is called.
-        void clearConversation() noexcept;
+        void clearConversation();
 
 
         [[nodiscard]]
@@ -76,6 +82,12 @@ namespace rose::core
         //
         // Conversation does not know which model provider is active.
         conversation::Conversation conversation_;
+
+        // Persistent conversation storage.
+        //
+        // RoseCore borrows this object. The worker thread owns it and guarantees that
+        // it outlives RoseCore.
+        persistence::IConversationStore& conversationStore_;
 
     };
 

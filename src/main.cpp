@@ -8,10 +8,11 @@
 #include "logging/Logger.h"
 #include "model/LlamaCppModelProvider.h"
 #include "model/LlamaLogBridge.h"
+#include "persistence/FileConversationStore.h"
 #include "platform/SdlRuntime.h"
+#include "platform/TtfRuntime.h"
 #include "ui/ChatBridge.h"
 #include "ui/SdlChatWindow.h"
-#include "platform/TtfRuntime.h"
 
 #include <SDL3/SDL.h>
 
@@ -20,11 +21,11 @@
 #include <exception>
 #include <iostream>
 #include <memory>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <thread>
 #include <utility>
-#include <optional>
 
 
 int main()
@@ -33,9 +34,13 @@ int main()
     // -------------------------------------------------------------------------
     // Windows console UTF-8
     // -------------------------------------------------------------------------
+    //
+    // Rose uses UTF-8 internally. Keep the development console in UTF-8 too so
+    // diagnostic output can display Unicode text correctly.
     SetConsoleOutputCP(CP_UTF8);
     SetConsoleCP(CP_UTF8);
 #endif
+
 
     try
     {
@@ -45,23 +50,35 @@ int main()
 
         rose::logging::Logger logger{
             rose::logging::LoggerConfig{
-                .mode = rose::logging::LogMode::Normal
+                .mode =
+                    rose::logging::LogMode::Normal
             }
         };
 
 
-        // SDL itself owns the graphics/window subsystem lifetime.
+        // SDL owns process-level graphics/window initialization.
+        //
+        // This object must outlive every SDL-backed Rose object.
         rose::platform::SdlRuntime sdlRuntime;
 
 
-        // SDL_ttf is a separate library with its own initialization reference.
+        // SDL_ttf has its own initialization lifetime.
         //
         // Declaration order is intentional:
         //
-        //     construct: SdlRuntime -> TtfRuntime
-        //     destroy:   TtfRuntime -> SdlRuntime
+        //     construct:
+        //         SdlRuntime
+        //         TtfRuntime
+        //
+        //     destroy:
+        //         TtfRuntime
+        //         SdlRuntime
         rose::platform::TtfRuntime ttfRuntime;
 
+
+        // =====================================================================
+        // Avatar
+        // =====================================================================
 
         rose::avatar::SdlAvatar avatar{
             sdlRuntime,
@@ -69,29 +86,30 @@ int main()
             300
         };
 
+
         avatar.loadSprite(
             "assets/avatar/RoseIdle.png");
+
 
         rose::avatar::AvatarController avatarController{
             avatar
         };
 
-        // -------------------------------------------------------------------------
-        // Graphical conversation bridge
-        // -------------------------------------------------------------------------
+
+        // =====================================================================
+        // Graphical conversation UI
+        // =====================================================================
         //
-        // ChatBridge is the thread boundary:
+        // ChatBridge is the only communication boundary between:
         //
         //     SDL/main thread
-        //         |
-        //         | submitUserMessage()
-        //         v
-        //     ChatBridge
-        //         |
-        //         v
-        //     Rose worker
         //
-        // The bridge outlives the worker because it is owned here in main().
+        // and
+        //
+        //     Rose/model worker thread
+        //
+        // The worker never directly touches SDL objects.
+
         rose::ui::ChatBridge chatBridge;
 
 
@@ -104,13 +122,22 @@ int main()
             520
         };
 
-        // Published by the worker when its RoseCore/model lifetime has ended.
+
+        // =====================================================================
+        // Worker synchronization
+        // =====================================================================
+
+        // Published by the Rose worker after all of its worker-owned objects
+        // have been destroyed.
         std::atomic<bool> conversationFinished{
             false
         };
 
 
-        // Worker exceptions cannot naturally cross std::thread boundaries.
+        // Exceptions cannot cross std::thread automatically.
+        //
+        // The worker stores fatal exceptions here and main rethrows them after
+        // joining the thread.
         std::exception_ptr workerException;
 
 
@@ -127,10 +154,28 @@ int main()
         // Rose worker
         // =====================================================================
         //
-        // RoseCore, Conversation, and llama.cpp stay entirely on this thread.
+        // OWNERSHIP
+        // ---------
         //
-        // The only cross-thread avatar operation is setState(), which is an
-        // atomic publication inside SdlAvatar.
+        // These objects live entirely on this worker:
+        //
+        //     LlamaLogBridge
+        //     LlamaCppModelProvider
+        //     FileConversationStore
+        //     RoseCore
+        //     Conversation
+        //
+        // Model inference, conversation mutation, and persistence therefore
+        // remain single-thread-owned.
+        //
+        // The only cross-thread paths are:
+        //
+        //     ChatBridge
+        //     SdlAvatar::setState() through AvatarController
+        //
+        // SdlAvatar publishes its state atomically and performs actual SDL work
+        // only on the main thread.
+
         std::thread conversationWorker{
             [&logger,
              &avatarController,
@@ -140,23 +185,35 @@ int main()
             {
                 try
                 {
+                    // ---------------------------------------------------------
+                    // llama.cpp diagnostic bridge
+                    // ---------------------------------------------------------
+
                     rose::model::LlamaLogBridge llamaLogBridge{
                         logger
                     };
 
 
+                    // ---------------------------------------------------------
+                    // Model configuration
+                    // ---------------------------------------------------------
+
                     rose::model::LlamaCppConfig modelConfig{
                         .modelPath =
                             "models/Qwen3-8B-Q4_K_M.gguf",
 
-                        .contextSize = 4096,
+                        .contextSize =
+                            8192,
 
-                        // Request more GPU layers than this model can possibly contain.
+                        // Rose's development machine currently has enough VRAM
+                        // for full Qwen3-8B Q4 GPU offload.
                         //
-                        // llama.cpp will therefore place all available model layers on the GPU.
-                        // Using a deliberately large value avoids coupling Rose to the exact layer
-                        // count of Qwen3-8B and also works when we swap models later.
-                        .gpuLayers = 999
+                        // Asking for more layers than the model contains lets
+                        // llama.cpp place every available layer on the GPU
+                        // without coupling this configuration to Qwen's exact
+                        // layer count.
+                        .gpuLayers =
+                            999
                     };
 
 
@@ -167,9 +224,27 @@ int main()
                                 logger);
 
 
+                    // ---------------------------------------------------------
+                    // Persistent conversation journal
+                    // ---------------------------------------------------------
+                    //
+                    // This object remains separate from RoseCore so persistence
+                    // can later move to SQLite or another backend without
+                    // changing the core conversation architecture.
+
+                    rose::persistence::FileConversationStore
+                        conversationStore{
+                            "data/conversations/current.rosechat"
+                        };
+
+
                     rose::core::RoseCore roseCore{
-                        std::move(modelProvider),
-                        logger
+                        std::move(
+                            modelProvider),
+
+                        logger,
+
+                        conversationStore
                     };
 
 
@@ -180,10 +255,15 @@ int main()
                     std::cout
                         << "Local model initialized.\n"
                         << "Input is now handled by Rose's SDL chat window.\n"
-                        << "Commands: /clear, /log silent|normal|verbose, /quit\n\n";
+                        << "Commands: "
+                        << "/clear, "
+                        << "/log silent|normal|verbose, "
+                        << "/quit\n\n";
 
 
-
+                    // =========================================================
+                    // Conversation loop
+                    // =========================================================
 
                     while (true)
                     {
@@ -191,26 +271,21 @@ int main()
                             rose::core::RoseActivity::Listening);
 
 
-                        // ---------------------------------------------------------------------
+                        // -----------------------------------------------------
                         // Wait for graphical user input
-                        // ---------------------------------------------------------------------
+                        // -----------------------------------------------------
                         //
-                        // The Rose worker sleeps here without consuming CPU until the SDL/UI
-                        // thread submits a message.
+                        // The condition variable inside ChatBridge sleeps the
+                        // worker here without consuming CPU.
                         //
-                        // ChatBridge's condition_variable wakes us when either:
-                        //
-                        //     - a user message arrives
-                        //     - shutdown is requested
-                        //
-                        // RoseCore itself remains entirely owned by this worker thread.
+                        // nullopt means shutdown has been requested.
+
                         std::optional<std::string> pendingInput =
                             chatBridge.waitForUserMessage();
 
 
                         if (!pendingInput)
                         {
-                            // nullopt means the UI requested shutdown.
                             break;
                         }
 
@@ -220,23 +295,26 @@ int main()
                                 *pendingInput);
 
 
-                        // Keep this temporarily so we can verify exactly what the GUI delivered.
+                        // Temporary development diagnostic.
                         std::cout
                             << "You: "
                             << input
                             << '\n';
 
-                        // -----------------------------------------------------
-                        // Logging commands
-                        // -----------------------------------------------------
+
+                        // =====================================================
+                        // Development logging commands
+                        // =====================================================
 
                         if (input == "/log silent")
                         {
                             logger.setMode(
                                 rose::logging::LogMode::Silent);
 
+
                             std::cout
                                 << "Logging mode: Silent.\n\n";
+
 
                             continue;
                         }
@@ -247,8 +325,10 @@ int main()
                             logger.setMode(
                                 rose::logging::LogMode::Normal);
 
+
                             std::cout
                                 << "Logging mode: Normal.\n\n";
+
 
                             continue;
                         }
@@ -259,16 +339,18 @@ int main()
                             logger.setMode(
                                 rose::logging::LogMode::Verbose);
 
+
                             std::cout
                                 << "Logging mode: Verbose.\n\n";
+
 
                             continue;
                         }
 
 
-                        // -----------------------------------------------------
+                        // =====================================================
                         // Application commands
-                        // -----------------------------------------------------
+                        // =====================================================
 
                         if (input == "/quit")
                         {
@@ -286,7 +368,8 @@ int main()
                             chatBridge.postEvent(
                                 rose::ui::ChatEvent{
                                     .type =
-                                        rose::ui::ChatEventType::ConversationCleared
+                                        rose::ui::ChatEventType::
+                                            ConversationCleared
                                 });
 
 
@@ -300,166 +383,248 @@ int main()
                         }
 
 
-                        // -----------------------------------------------------
-                        // Rose activity -> avatar
-                        // -----------------------------------------------------
+                        // =====================================================
+                        // One user/model request
+                        // =====================================================
+                        //
+                        // This try/catch is deliberately INSIDE the conversation
+                        // loop.
+                        //
+                        // A failure processing one message must not terminate
+                        // Rose.
+                        //
+                        // Examples of recoverable request failures:
+                        //
+                        //     context overflow
+                        //     oversized user input
+                        //     inference request failure
+                        //     persistence write failure
+                        //
+                        // Fatal worker initialization failures are still caught
+                        // by the outer worker try/catch.
 
-                        const rose::core::RoseActivityCallback onActivity =
-                            [&avatarController](
-                                const rose::core::RoseActivity activity)
-                            {
-                                avatarController.handleActivity(
-                                    activity);
+                        try
+                        {
+                            bool responseStarted{
+                                false
                             };
 
 
-                        // -----------------------------------------------------
-                        // Streaming console output
-                        // -----------------------------------------------------
+                            // -------------------------------------------------
+                            // Rose activity -> avatar
+                            // -------------------------------------------------
 
-                        // -------------------------------------------------------------------------
-                        // Stream Rose -> graphical UI
-                        // -------------------------------------------------------------------------
-                        //
-                        // The model worker never touches SDL.
-                        //
-                        // Instead, generated text crosses the thread boundary as owned ChatEvents:
-                        //
-                        //     model worker
-                        //         |
-                        //         | ChatEvent
-                        //         v
-                        //     ChatBridge
-                        //         |
-                        //         v
-                        //     SDL/main thread
-                        //
-                        // SdlChatWindow::update() consumes those events and updates presentation
-                        // state before render().
-
-                        bool responseStarted{
-                            false
-                        };
-
-
-                        const rose::model::ModelTextCallback onText =
-                            [&chatBridge,
-                            &responseStarted](
-                                const std::string_view text)
-                            {
-                                if (text.empty())
+                            const rose::core::RoseActivityCallback
+                                onActivity =
+                                [&avatarController](
+                                    const rose::core::RoseActivity
+                                        activity)
                                 {
-                                    return;
-                                }
+                                    avatarController.handleActivity(
+                                        activity);
+                                };
 
 
-                                if (!responseStarted)
+                            // -------------------------------------------------
+                            // Model streaming -> graphical chat
+                            // -------------------------------------------------
+                            //
+                            // ModelTextCallback only lends us its string_view
+                            // during this callback.
+                            //
+                            // ChatBridge owns events after this function
+                            // returns, so streamed text is copied into an owned
+                            // std::string before crossing the thread boundary.
+
+                            const rose::model::ModelTextCallback
+                                onText =
+                                [&chatBridge,
+                                 &responseStarted](
+                                    const std::string_view text)
+                                {
+                                    if (text.empty())
+                                    {
+                                        return;
+                                    }
+
+
+                                    if (!responseStarted)
+                                    {
+                                        chatBridge.postEvent(
+                                            rose::ui::ChatEvent{
+                                                .type =
+                                                    rose::ui::
+                                                    ChatEventType::
+                                                    AssistantStarted
+                                            });
+
+
+                                        responseStarted =
+                                            true;
+                                    }
+
+
+                                    chatBridge.postEvent(
+                                        rose::ui::ChatEvent{
+                                            .type =
+                                                rose::ui::
+                                                ChatEventType::
+                                                AssistantText,
+
+                                            .text =
+                                                std::string{
+                                                    text
+                                                }
+                                        });
+                                };
+
+
+                            // -------------------------------------------------
+                            // Generate exactly ONE response for this input
+                            // -------------------------------------------------
+
+                            const rose::model::ModelResponse response =
+                                roseCore.processMessage(
+                                    input,
+                                    onText,
+                                    onActivity);
+
+
+                            // -------------------------------------------------
+                            // Defensive non-streaming fallback
+                            // -------------------------------------------------
+                            //
+                            // LlamaCppModelProvider currently streams.
+                            //
+                            // A future provider may implement generate() only
+                            // and therefore return the whole response at once.
+                            //
+                            // The frontend should work in either case.
+
+                            if (!responseStarted)
+                            {
+                                chatBridge.postEvent(
+                                    rose::ui::ChatEvent{
+                                        .type =
+                                            rose::ui::
+                                            ChatEventType::
+                                            AssistantStarted
+                                    });
+
+
+                                if (!response.text.empty())
                                 {
                                     chatBridge.postEvent(
                                         rose::ui::ChatEvent{
                                             .type =
-                                                rose::ui::ChatEventType::AssistantStarted
+                                                rose::ui::
+                                                ChatEventType::
+                                                AssistantText,
+
+                                            .text =
+                                                response.text
                                         });
-
-
-                                    responseStarted = true;
                                 }
+                            }
 
 
-                                // ModelTextCallback only lends us the string_view for this invocation.
-                                //
-                                // ChatBridge must own the text after this callback returns, so create
-                                // an owned std::string here.
-                                chatBridge.postEvent(
-                                    rose::ui::ChatEvent{
-                                        .type =
-                                            rose::ui::ChatEventType::AssistantText,
-
-                                        .text =
-                                            std::string{
-                                                text
-                                            }
-                                    });
-                            };
-
-
-                        const rose::model::ModelResponse response =
-                            roseCore.processMessage(
-                                input,
-                                onText,
-                                onActivity);
-
-                        // -------------------------------------------------------------------------
-                        // Defensive non-streaming fallback
-                        // -------------------------------------------------------------------------
-                        //
-                        // Normally our llama.cpp provider streams visible text incrementally.
-                        //
-                        // A future provider might return only the final ModelResponse. In that case,
-                        // still make sure the graphical frontend receives the response.
-                        if (!responseStarted)
-                        {
+                            // Tell the frontend this response has completely
+                            // finished streaming.
                             chatBridge.postEvent(
                                 rose::ui::ChatEvent{
                                     .type =
-                                        rose::ui::ChatEventType::AssistantStarted
+                                        rose::ui::
+                                        ChatEventType::
+                                        AssistantFinished
                                 });
 
 
-                            if (!response.text.empty())
-                            {
-                                chatBridge.postEvent(
-                                    rose::ui::ChatEvent{
-                                        .type =
-                                            rose::ui::ChatEventType::AssistantText,
-
-                                        .text =
-                                            response.text
-                                    });
-                            }
+                            std::cout
+                                << "\n\n"
+                                << "[Generated tokens: "
+                                << response.generatedTokens
+                                << "]\n"
+                                << "[Finish reason: "
+                                << (
+                                    response.finishReason
+                                    == rose::model::ModelFinishReason::TokenLimit
+                                    ? "Token limit"
+                                    : "End of generation")
+                                << "]\n\n";
                         }
+                        catch (const std::exception& exception)
+                        {
+                            // ---------------------------------------------
+                            // Recoverable request failure
+                            // ---------------------------------------------
+                            //
+                            // RoseCore may already have published Confused,
+                            // but explicitly setting it here also covers
+                            // failures originating outside RoseCore.
+
+                            avatarController.handleActivity(
+                                rose::core::RoseActivity::Confused);
 
 
-                        // AssistantFinished tells the UI that streaming for THIS response is done.
-                        //
-                        // SdlChatWindow can then move its temporary streaming string into the
-                        // permanent transcript.
-                        chatBridge.postEvent(
-                            rose::ui::ChatEvent{
-                                .type =
-                                    rose::ui::ChatEventType::AssistantFinished
-                            });
+                            chatBridge.postEvent(
+                                rose::ui::ChatEvent{
+                                    .type =
+                                        rose::ui::ChatEventType::Error,
 
-                        std::cout
-                            << "\n\n"
-                            << "[Generated tokens: "
-                            << response.generatedTokens
-                            << "]\n\n";
+                                    .text =
+                                        std::string{
+                                            "Rose could not complete "
+                                            "that request: "
+                                        }
+                                        + exception.what()
+                                });
+
+
+                            // Do NOT break.
+                            //
+                            // Rose returns to the top of the loop and accepts
+                            // another user message.
+                        }
                     }
 
 
+                    // Normal shutdown leaves Rose in a neutral state while the
+                    // worker-owned objects unwind.
                     avatarController.handleActivity(
                         rose::core::RoseActivity::Idle);
                 }
                 catch (...)
                 {
+                    // =========================================================
+                    // Fatal worker failure
+                    // =========================================================
+                    //
+                    // This path is reserved for failures outside an individual
+                    // user request, such as model initialization or persistent
+                    // conversation restoration.
+
                     workerException =
                         std::current_exception();
 
 
                     avatarController.handleActivity(
                         rose::core::RoseActivity::Confused);
+
+
+                    chatBridge.postEvent(
+                        rose::ui::ChatEvent{
+                            .type =
+                                rose::ui::ChatEventType::Error,
+
+                            .text =
+                                "Rose's conversation worker "
+                                "stopped unexpectedly."
+                        });
                 }
 
-                chatBridge.postEvent(
-                    rose::ui::ChatEvent{
-                        .type =
-                            rose::ui::ChatEventType::Error,
 
-                        .text =
-                            "Rose's conversation worker stopped unexpectedly."
-                    });
-
+                // Always publish worker completion, whether it exited normally
+                // or because of a fatal exception.
                 conversationFinished.store(
                     true,
                     std::memory_order_release);
@@ -470,24 +635,28 @@ int main()
         // =====================================================================
         // SDL main thread
         // =====================================================================
+        //
+        // This is the ONLY thread that consumes SDL's event queue or renders
+        // SDL windows.
 
         bool avatarWindowOpen{
             true
         };
 
+
         bool chatWindowOpen{
             true
         };
+
 
         while (
             !conversationFinished.load(
                 std::memory_order_acquire))
         {
-            // ---------------------------------------------------------------------
+            // -----------------------------------------------------------------
             // Central SDL event pump
-            // ---------------------------------------------------------------------
-            //
-            // main() is the ONLY place that consumes SDL's process-wide event queue.
+            // -----------------------------------------------------------------
+
             SDL_Event event{};
 
 
@@ -496,11 +665,16 @@ int main()
             {
                 if (event.type == SDL_EVENT_QUIT)
                 {
-                    // Wake the Rose worker if it is currently waiting for input.
+                    // Wake the worker if it is blocked waiting for input.
                     chatBridge.requestShutdown();
 
-                    avatarWindowOpen = false;
-                    chatWindowOpen = false;
+
+                    avatarWindowOpen =
+                        false;
+
+                    chatWindowOpen =
+                        false;
+
 
                     continue;
                 }
@@ -523,34 +697,35 @@ int main()
 
                     if (!stillOpen)
                     {
-                        chatWindowOpen = false;
+                        chatWindowOpen =
+                            false;
 
 
-                        // The chat window is Rose's primary application UI now.
+                        // The graphical chat is still our primary development
+                        // UI. Closing it currently means shutting Rose down.
                         //
-                        // Closing it requests application shutdown. This immediately
-                        // wakes the worker if it is waiting for another message.
+                        // Later Rose herself becomes the primary interface and
+                        // closing a chat surface will no longer necessarily
+                        // terminate the application.
                         chatBridge.requestShutdown();
                     }
                 }
             }
 
 
-            // ---------------------------------------------------------------------
-            // UI state update
-            // ---------------------------------------------------------------------
-            //
-            // There are no Rose -> GUI chat events yet, but calling update() now makes
-            // the main loop structurally correct for Checkpoint 3.
+            // -----------------------------------------------------------------
+            // UI state updates
+            // -----------------------------------------------------------------
+
             if (chatWindowOpen)
             {
                 chatWindow.update();
             }
 
 
-            // ---------------------------------------------------------------------
+            // -----------------------------------------------------------------
             // Rendering
-            // ---------------------------------------------------------------------
+            // -----------------------------------------------------------------
 
             if (avatarWindowOpen)
             {
@@ -564,6 +739,10 @@ int main()
             }
 
 
+            // Approximately 60 Hz presentation loop.
+            //
+            // Model inference is on the worker, so sleeping here does not slow
+            // generation.
             std::this_thread::sleep_for(
                 std::chrono::milliseconds{
                     16
@@ -581,6 +760,8 @@ int main()
         }
 
 
+        // Only actual worker-level failures reach the application's fatal
+        // exception handler.
         if (workerException)
         {
             std::rethrow_exception(
@@ -596,6 +777,7 @@ int main()
             << "Fatal Rose error: "
             << exception.what()
             << '\n';
+
 
         return 1;
     }

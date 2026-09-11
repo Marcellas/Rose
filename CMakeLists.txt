@@ -178,6 +178,10 @@ add_executable(Rose
     src/model/LlamaCppModelProvider.h
     src/model/LlamaCppModelProvider.cpp
 
+    src/persistence/IConversationStore.h
+    src/persistence/FileConversationStore.h
+    src/persistence/FileConversationStore.cpp
+
     src/ui/ChatBridge.h
     src/ui/ChatBridge.cpp
     src/ui/SdlChatWindow.h

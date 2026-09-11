@@ -1,6 +1,7 @@
 #include "core/RoseCore.h"
 
 #include "model/IModelProvider.h"
+#include "persistence/IConversationStore.h"
 
 #include <stdexcept>
 #include <string>
@@ -13,16 +14,30 @@ namespace rose::core
     RoseCore::RoseCore(
         std::unique_ptr<model::IModelProvider> modelProvider,
         logging::Logger& logger,
-        const conversation::ConversationConfig conversationConfig)
-        : modelProvider_{ std::move(modelProvider) }
-        , logger_{ logger }
-        , conversation_{ conversationConfig }
+        persistence::IConversationStore& conversationStore,
+        conversation::ConversationConfig config)
+        : modelProvider_{
+            std::move(modelProvider)
+        },
+        logger_{
+          logger
+        },
+        conversation_{
+          config
+        },
+        conversationStore_{
+          conversationStore
+        }
     {
-        if (!modelProvider_)
+        auto storedTurns =
+            conversationStore_.loadTurns();
+
+
+        for (auto& turn : storedTurns)
         {
-            throw std::invalid_argument{
-                "RoseCore requires a valid ModelProvider."
-            };
+            conversation_.commitTurn(
+                std::move(turn.userText),
+                std::move(turn.assistantText));
         }
     }
 
@@ -121,6 +136,64 @@ namespace rose::core
             .sampling = {},
         };
 
+        while (true)
+        {
+            const model::ModelContextUsage usage =
+                modelProvider_->inspectContext(
+                    request);
+
+            logger_.debug(
+                "RoseCore",
+                "Context usage: "
+                + std::to_string(
+                    usage.promptTokens)
+                + " prompt + "
+                + std::to_string(
+                    usage.requestedGenerationTokens)
+                + " response = "
+                + std::to_string(
+                    usage.totalRequestedTokens())
+                + " / "
+                + std::to_string(
+                    usage.contextCapacity));
+
+            if (usage.fits())
+            {
+                break;
+            }
+
+
+            // Expected layout:
+            //
+            // [0] system
+            // [1...] historical user/assistant turns
+            // [last] current user
+            //
+            // If there is at least one historical complete turn, remove the oldest
+            // user + assistant pair while preserving system and current input.
+            if (request.messages.size() >= 4)
+            {
+                logger_.debug(
+                    "RoseCore",
+                    "Context exceeds capacity; removing oldest "
+                    "user/assistant turn from working context.");
+
+                request.messages.erase(
+                    request.messages.begin() + 1,
+                    request.messages.begin() + 3);
+
+                continue;
+            }
+
+
+            // No historical context remains.
+            //
+            // Therefore the system prompt + current user message + requested output
+            // cannot fit even by themselves.
+            throw std::runtime_error{
+                "This message is too large to process in one request."
+            };
+        }
 
         // -------------------------------------------------------------------------
 // Generate the assistant response.
@@ -221,6 +294,14 @@ namespace rose::core
                         request);
             }
 
+            // Persist the complete successful turn before considering it committed to
+            // Rose's active conversation.
+            //
+            // If disk persistence fails, the exception propagates instead of silently
+            // allowing RAM and disk history to diverge.
+            conversationStore_.appendTurn(
+                userText,
+                response.text);
 
             // Commit only after generation succeeds.
             //
@@ -257,10 +338,16 @@ namespace rose::core
     }
 
 
-    void RoseCore::clearConversation() noexcept
-    {
-        conversation_.clear();
-    }
+        void RoseCore::clearConversation()
+        {
+            // Clear persistent storage first.
+            //
+            // If disk deletion fails, leave the in-memory conversation intact rather
+            // than pretending the historical conversation was erased.
+            conversationStore_.clear();
+
+            conversation_.clear();
+        }
 
 
     std::size_t

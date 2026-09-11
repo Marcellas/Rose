@@ -2,9 +2,21 @@
 
 #include <string>
 #include <utility>
+#include <limits>
 
 namespace rose::model
 {
+    ModelContextUsage EchoModelProvider::inspectContext(
+        const ModelRequest& request) const
+    {
+        return ModelContextUsage{
+            .promptTokens = 0,
+            .contextCapacity =
+                std::numeric_limits<std::int32_t>::max(),
+            .requestedGenerationTokens =
+                request.maxGeneratedTokens
+        };
+    }
 
     ModelResponse EchoModelProvider::generate(
         const ModelRequest& request)
@@ -47,6 +59,7 @@ namespace rose::model
             .finishReason =
                 ModelFinishReason::EndOfGeneration
         };
+
     }
 
 } // namespace rose::model

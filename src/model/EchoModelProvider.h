@@ -5,11 +5,15 @@
 namespace rose::model
 {
 
-    // Deterministic provider useful for testing Rose without loading an actual
-    // language model.
-    class EchoModelProvider final : public IModelProvider
+    class EchoModelProvider final
+        : public IModelProvider
     {
     public:
+        [[nodiscard]]
+        ModelContextUsage inspectContext(
+            const ModelRequest& request) const override;
+
+
         [[nodiscard]]
         ModelResponse generate(
             const ModelRequest& request) override;

@@ -117,21 +117,50 @@ namespace rose::model
             std::scoped_lock lock{ mutex_ };
 
 
-            // A non-CONT event begins a new logical message.
+            // -------------------------------------------------------------------------
+            // Third-party debug filtering
+            // -------------------------------------------------------------------------
             //
-            // If llama.cpp previously left an unterminated fragment behind, flush
-            // it before beginning the next message.
-            if (
-                level != GGML_LOG_LEVEL_CONT
-                && !pending_.empty())
+            // llama.cpp's DEBUG stream contains extremely fine-grained implementation
+            // details such as:
+            //
+            //     CUDA Graph id 123 reused
+            //     graph warmup events
+            //     scheduler internals
+            //
+            // Rose's Verbose mode is intended to diagnose ROSE:
+            //
+            //     - context budgeting
+            //     - model requests
+            //     - memory retrieval
+            //     - tool execution
+            //
+            // It should not automatically become a full llama/ggml execution trace.
+            //
+            // Drop a DEBUG logical message before accumulating its text. CONT fragments
+            // inherit the disposition of the message they continue.
+            if (level != GGML_LOG_LEVEL_CONT)
             {
-                flushPending();
+                // Flush an unfinished previous message before starting a new one.
+                if (!pending_.empty())
+                {
+                    flushPending();
+                }
+
+
+                pendingLevel_ = level;
+
+                droppingCurrentMessage_ =
+                    level == GGML_LOG_LEVEL_DEBUG;
             }
 
 
-            if (level != GGML_LOG_LEVEL_CONT)
+            // A CONT callback belongs to the previously-started logical message.
+            //
+            // If that message was DEBUG, discard its continuation too.
+            if (droppingCurrentMessage_)
             {
-                pendingLevel_ = level;
+                return;
             }
 
 
@@ -140,12 +169,10 @@ namespace rose::model
                 text.size());
 
 
-            // Keep the bridge itself bounded too.
-            //
-            // Rose's Logger already bounds retained messages, but without this
-            // guard a third-party library could theoretically feed us an enormous
+            // Keep the bridge bounded even if a third-party library emits one enormous
             // unterminated line.
             constexpr std::size_t maxPendingBytes{ 8192 };
+
 
             if (pending_.size() > maxPendingBytes)
             {
@@ -229,23 +256,22 @@ namespace rose::model
             const ggml_log_level level,
             const std::string_view message)
         {
-            // ---------------------------------------------------------------------
-            // Third-party log policy
-            // ---------------------------------------------------------------------
-            //
-            // Most llama.cpp startup information is developer-level implementation
-            // detail rather than something a Rose user needs to see.
-            //
-            // Therefore:
-            //
-            //     llama ERROR -> Rose Error
-            //     everything else -> Rose Debug
-            //
-            // Normal mode becomes quiet.
-            // Verbose mode retains the complete llama diagnostic stream.
-            //
-            // Later we can promote specific meaningful conditions to Rose warnings
-            // ourselves, using provider-neutral descriptions.
+            // -------------------------------------------------------------------------
+   // Third-party log policy
+   // -------------------------------------------------------------------------
+   //
+   // Raw llama DEBUG traffic has already been discarded by consume().
+   //
+   // Remaining llama diagnostics are comparatively infrequent:
+   //
+   //     llama ERROR       -> Rose Error
+   //     llama info/warn   -> Rose Debug
+   //
+   // This keeps Normal mode quiet while allowing selected third-party
+   // diagnostics to remain visible in Verbose mode.
+   //
+   // Later we can promote specific llama warnings into provider-neutral Rose
+   // warnings once Rose's diagnostic event taxonomy is mature.
             if (level == GGML_LOG_LEVEL_ERROR)
             {
                 logger_.error(
@@ -261,7 +287,6 @@ namespace rose::model
                 message);
         }
 
-
         logging::Logger& logger_;
 
         std::mutex mutex_;
@@ -271,6 +296,8 @@ namespace rose::model
         ggml_log_level pendingLevel_{
             GGML_LOG_LEVEL_DEBUG
         };
+
+        bool droppingCurrentMessage_{ false };
     };
 
 
