@@ -129,6 +129,7 @@ namespace rose::tools
                 "Generate a new local image from a text prompt and store it "
                 "as a Rose-owned artifact.",
             .risk = ToolRisk::LocalWrite,
+            .consent = ToolConsent::AutoAllowed,
             .parameters = {
                 ToolParameterDescriptor{
                     .name = "prompt",

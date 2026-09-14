@@ -110,8 +110,8 @@ namespace rose::ui
             TexturePtr texture;
             float sourceWidth{ 0.0f };
             float sourceHeight{ 0.0f };
-            SDL_FRect lastPreviewRect{};
-            bool hasClickablePreview{ false };
+            SDL_FRect lastClickRect{};
+            bool hasClickableRegion{ false };
         };
 
 
@@ -258,12 +258,18 @@ namespace rose::ui
         void appendArtifact(
             artifacts::Artifact artifact)
         {
+            const bool isImage =
+                artifact.kind
+                == artifacts::ArtifactKind::Image;
+
             std::string description =
-                "Generated image: "
+                (isImage
+                    ? "Generated image: "
+                    : "Created file: ")
                 + artifact.displayName
                 + "\n"
                 + artifact.path.string()
-                + "\nLeft-click the preview to open it; right-click to reveal it in Explorer.";
+                + "\nLeft-click the artifact card to open it; right-click to reveal it in Explorer.";
 
             Entry entry;
             entry.document =
@@ -558,14 +564,14 @@ namespace rose::ui
             {
                 if (
                     !entry.artifact.has_value()
-                    || !entry.artifact->hasClickablePreview)
+                    || !entry.artifact->hasClickableRegion)
                 {
                     continue;
                 }
 
                 if (
                     pointInside(
-                        entry.artifact->lastPreviewRect,
+                        entry.artifact->lastClickRect,
                         x,
                         y))
                 {
@@ -647,7 +653,7 @@ namespace rose::ui
             {
                 if (entry.artifact.has_value())
                 {
-                    entry.artifact->hasClickablePreview = false;
+                    entry.artifact->hasClickableRegion = false;
                 }
             }
 
@@ -722,15 +728,24 @@ namespace rose::ui
                             &renderer_,
                             &card);
 
+                        ArtifactVisual& visual =
+                            *entry.artifact;
+
+                        visual.lastClickRect =
+                            card;
+
+                        visual.hasClickableRegion =
+                            card.y + card.h
+                                >= static_cast<float>(y)
+                            && card.y
+                                <= static_cast<float>(y + height);
+
                         responseRenderer_.draw(
                             entry.layout,
                             card.x
                                 + static_cast<float>(cardPadding),
                             card.y
                                 + static_cast<float>(cardPadding));
-
-                        ArtifactVisual& visual =
-                            *entry.artifact;
 
                         const int previewHeight =
                             artifactPreviewHeight(
@@ -779,15 +794,6 @@ namespace rose::ui
                                 nullptr,
                                 &destination);
 
-                            visual.lastPreviewRect =
-                                destination;
-
-                            visual.hasClickablePreview =
-                                destination.y
-                                    + destination.h
-                                    >= static_cast<float>(y)
-                                && destination.y
-                                    <= static_cast<float>(y + height);
                         }
                     }
                 }

@@ -466,6 +466,15 @@ add_dependencies(
 add_executable(Rose
     src/main.cpp
 
+
+    src/agent/AgentTypes.h
+    src/agent/ToolSelectionAgent.h
+    src/agent/ToolSelectionAgent.cpp
+    src/agent/ToolObservation.h
+    src/agent/ToolObservation.cpp
+
+    src/permissions/ToolExecutionPolicy.h
+    src/permissions/ToolExecutionPolicy.cpp
     src/core/RoseCore.h
     src/core/RoseCore.cpp
 
@@ -575,6 +584,13 @@ add_executable(Rose
     src/tools/ToolRegistry.cpp
     src/tools/GenerateImageRegisteredTool.h
     src/tools/GenerateImageRegisteredTool.cpp
+    src/agent/ToolConfirmation.h
+    src/agent/ToolConfirmation.cpp
+
+    src/tools/CreateTextFileTool.h
+    src/tools/CreateTextFileTool.cpp
+    src/agent/AgentLoop.h
+    src/agent/AgentLoop.cpp
 )
 
 # =============================================================================

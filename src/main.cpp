@@ -2,6 +2,10 @@
 #include <Windows.h>
 #endif
 
+#include "agent/AgentLoop.h"
+#include "agent/ToolConfirmation.h"
+#include "agent/ToolObservation.h"
+#include "agent/ToolSelectionAgent.h"
 #include "artifacts/ArtifactStore.h"
 #include "avatar/AvatarController.h"
 #include "avatar/SdlAvatar.h"
@@ -12,10 +16,12 @@
 #include "model/LlamaLogBridge.h"
 #include "ocr/TesseractCliOcrEngine.h"
 #include "permissions/PermissionSystem.h"
+#include "permissions/ToolExecutionPolicy.h"
 #include "persistence/FileConversationStore.h"
 #include "platform/SdlRuntime.h"
 #include "platform/TtfRuntime.h"
 #include "tools/AttachmentIngestion.h"
+#include "tools/CreateTextFileTool.h"
 #include "tools/GenerateImageTool.h"
 #include "tools/GenerateImageRegisteredTool.h"
 #include "tools/ToolRegistry.h"
@@ -37,6 +43,7 @@
 #include <string_view>
 #include <thread>
 #include <utility>
+#include <vector>
 
 
 int main()
@@ -156,6 +163,17 @@ int main()
                                 modelConfig,
                                 logger);
 
+                    // RoseCore will own the provider, but the Agent also needs
+                    // non-owning access to the SAME already-loaded model.
+                    //
+                    // This pointer remains valid because:
+                    //   1. RoseCore takes ownership immediately below.
+                    //   2. ToolSelectionAgent is declared after RoseCore and is
+                    //      therefore destroyed before RoseCore.
+                    //   3. Everything stays on this single worker thread.
+                    auto* agentModelProvider =
+                        modelProvider.get();
+
 
                     // ---------------------------------------------------------
                     // Persistence + RoseCore
@@ -274,6 +292,57 @@ int main()
                             rose::tools::GenerateImageRegisteredTool>(
                                 generateImageTool));
 
+                    // First user-confirmed filesystem mutation tool. It is owned
+                    // directly by ToolRegistry and deliberately cannot overwrite
+                    // an existing file.
+                    toolRegistry.registerTool(
+                        std::make_unique<
+                            rose::tools::CreateTextFileTool>());
+
+
+                    // ---------------------------------------------------------
+                    // First bounded Agent layer
+                    // ---------------------------------------------------------
+                    //
+                    // The Agent borrows the same provider RoseCore owns. It runs a
+                    // short, non-persistent control inference that chooses either:
+                    //
+                    //     RespondNormally
+                    //
+                    // or exactly one ToolRequest.
+                    //
+                    // It never executes tools itself. Agent proposals still pass
+                    // through ToolExecutionPolicy and ToolRegistry.
+
+                    rose::permissions::ToolExecutionPolicy toolExecutionPolicy;
+
+                    rose::agent::ToolSelectionAgent toolSelectionAgent{
+                        *agentModelProvider,
+                        toolRegistry,
+                        logger
+                    };
+
+                    // The bounded Agent loop may execute several safe steps in one
+                    // request, but never more than its configured ceiling.
+                    //
+                    // It still cannot bypass ToolExecutionPolicy. A step requiring
+                    // consent pauses the WHOLE run with the exact ToolRequest intact.
+                    rose::agent::AgentLoop agentLoop{
+                        toolSelectionAgent,
+                        toolRegistry,
+                        toolExecutionPolicy,
+                        logger,
+                        rose::agent::AgentLoopConfig{
+                            .maximumToolExecutions = 3
+                        }
+                    };
+
+                    // At most one workflow may be paused for confirmation. The state
+                    // includes prior tool observations so /confirm resumes the SAME
+                    // user goal instead of starting a new model guess.
+                    std::optional<rose::agent::PendingAgentRun>
+                        pendingAgentRun;
+
 
                     avatarController.handleActivity(
                         rose::core::RoseActivity::Idle);
@@ -281,9 +350,12 @@ int main()
                     std::cout
                         << "Local model initialized.\n"
                         << "Input is now handled by Rose's SDL chat window.\n"
+                        << "Natural-language tool selection is enabled.\n"
                         << "Commands: "
                         << "/image <prompt>, "
                         << "/tools, "
+                        << "/confirm, "
+                        << "/cancel, "
                         << "/clear, "
                         << "/log silent|normal|verbose, "
                         << "/quit\n\n";
@@ -345,6 +417,110 @@ int main()
                         }
 
                         std::cout << '\n';
+
+
+                        // =====================================================
+                        // Explicit paused-agent confirmation
+                        // =====================================================
+                        //
+                        // /confirm resumes the exact PendingAgentRun. The stored
+                        // ToolRequest is executed first, then the bounded loop may
+                        // reason again and choose another step if the original goal
+                        // still requires one.
+
+                        std::optional<rose::agent::PendingAgentRun>
+                            confirmedAgentRun;
+
+                        if (
+                            commandEligible
+                            && submittedText == "/confirm")
+                        {
+                            if (!pendingAgentRun.has_value())
+                            {
+                                chatBridge.postEvent(
+                                    rose::ui::ChatEvent{
+                                        .type =
+                                            rose::ui::ChatEventType::
+                                            AssistantStarted
+                                    });
+
+                                chatBridge.postEvent(
+                                    rose::ui::ChatEvent{
+                                        .type =
+                                            rose::ui::ChatEventType::
+                                            AssistantFinished,
+
+                                        .text =
+                                            "There is no pending tool action to confirm."
+                                    });
+
+                                continue;
+                            }
+
+                            confirmedAgentRun =
+                                std::move(*pendingAgentRun);
+
+                            pendingAgentRun.reset();
+                        }
+                        else if (
+                            commandEligible
+                            && submittedText == "/cancel")
+                        {
+                            if (pendingAgentRun.has_value())
+                            {
+                                const bool partialWorkCompleted =
+                                    pendingAgentRun->state.executedToolCount > 0;
+
+                                pendingAgentRun.reset();
+
+                                chatBridge.postEvent(
+                                    rose::ui::ChatEvent{
+                                        .type =
+                                            rose::ui::ChatEventType::
+                                            AssistantStarted
+                                    });
+
+                                chatBridge.postEvent(
+                                    rose::ui::ChatEvent{
+                                        .type =
+                                            rose::ui::ChatEventType::
+                                            AssistantFinished,
+
+                                        .text =
+                                            partialWorkCompleted
+                                                ? "Cancelled the pending next action. Earlier steps that already completed remain in place."
+                                                : "Cancelled. I did not execute the pending action."
+                                    });
+                            }
+                            else
+                            {
+                                chatBridge.postEvent(
+                                    rose::ui::ChatEvent{
+                                        .type =
+                                            rose::ui::ChatEventType::
+                                            AssistantStarted
+                                    });
+
+                                chatBridge.postEvent(
+                                    rose::ui::ChatEvent{
+                                        .type =
+                                            rose::ui::ChatEventType::
+                                            AssistantFinished,
+
+                                        .text =
+                                            "There is no pending tool action to cancel."
+                                    });
+                            }
+
+                            continue;
+                        }
+                        else if (pendingAgentRun.has_value())
+                        {
+                            // A paused action is intentionally short-lived. Any
+                            // unrelated next message expires it, preventing a stale
+                            // /confirm from firing much later.
+                            pendingAgentRun.reset();
+                        }
 
 
                         // =====================================================
@@ -552,6 +728,7 @@ int main()
                             commandEligible
                             && submittedText == "/clear")
                         {
+                            pendingAgentRun.reset();
                             roseCore.clearConversation();
 
                             chatBridge.postEvent(
@@ -596,6 +773,173 @@ int main()
                             std::string transientContext =
                                 std::move(
                                     ingested.transientContext);
+
+                            // -------------------------------------------------
+                            // Bounded Agent workflow
+                            // -------------------------------------------------
+                            //
+                            // Text-only requests enter a bounded loop:
+                            //
+                            //   decide -> policy -> execute -> observe -> decide
+                            //
+                            // Safe tools may chain automatically. Any step requiring
+                            // confirmation pauses here and resumes later from the exact
+                            // stored run state. Attachments still bypass Agent routing
+                            // for now and go directly to normal RoseCore inference.
+
+                            std::vector<rose::artifacts::Artifact> pendingArtifacts;
+
+                            if (confirmedAgentRun.has_value())
+                            {
+                                avatarController.handleActivity(
+                                    rose::core::RoseActivity::Working);
+
+                                rose::agent::AgentLoopResult agentResult =
+                                    agentLoop.resumeConfirmed(
+                                        std::move(*confirmedAgentRun));
+
+                                if (
+                                    agentResult.status
+                                    == rose::agent::AgentLoopStatus::
+                                        RequiresConfirmation)
+                                {
+                                    // Earlier auto-allowed steps may already have
+                                    // produced artifacts before a later step paused.
+                                    // Deliver those now; they are real completed work.
+                                    for (auto& artifact : agentResult.artifacts)
+                                    {
+                                        chatBridge.postEvent(
+                                            rose::ui::ChatEvent{
+                                                .type =
+                                                    rose::ui::ChatEventType::
+                                                    ArtifactReady,
+                                                .artifact =
+                                                    std::move(artifact)
+                                            });
+                                    }
+                                    if (!agentResult.pending.has_value())
+                                    {
+                                        throw std::runtime_error{
+                                            "Agent loop requested confirmation without pending state."
+                                        };
+                                    }
+
+                                    pendingAgentRun =
+                                        std::move(agentResult.pending);
+
+                                    chatBridge.postEvent(
+                                        rose::ui::ChatEvent{
+                                            .type =
+                                                rose::ui::ChatEventType::
+                                                AssistantStarted
+                                        });
+
+                                    chatBridge.postEvent(
+                                        rose::ui::ChatEvent{
+                                            .type =
+                                                rose::ui::ChatEventType::
+                                                AssistantFinished,
+                                            .text =
+                                                pendingAgentRun->confirmation.
+                                                    userFacingSummary
+                                        });
+
+                                    avatarController.handleActivity(
+                                        rose::core::RoseActivity::Idle);
+
+                                    continue;
+                                }
+
+                                for (auto& artifact : agentResult.artifacts)
+                                {
+                                    pendingArtifacts.push_back(
+                                        std::move(artifact));
+                                }
+
+                                // /confirm is a control command, not the canonical
+                                // user turn. Resume final response generation against
+                                // the ORIGINAL request stored in the agent run.
+                                input =
+                                    std::move(agentResult.userTextForResponse);
+
+                                transientContext =
+                                    std::move(agentResult.transientContext);
+                            }
+                            else if (commandEligible)
+                            {
+                                avatarController.handleActivity(
+                                    rose::core::RoseActivity::Thinking);
+
+                                rose::agent::AgentLoopResult agentResult =
+                                    agentLoop.start(
+                                        input,
+                                        transientContext);
+
+                                if (
+                                    agentResult.status
+                                    == rose::agent::AgentLoopStatus::
+                                        RequiresConfirmation)
+                                {
+                                    // Earlier auto-allowed steps may already have
+                                    // produced artifacts before a later step paused.
+                                    // Deliver those now; they are real completed work.
+                                    for (auto& artifact : agentResult.artifacts)
+                                    {
+                                        chatBridge.postEvent(
+                                            rose::ui::ChatEvent{
+                                                .type =
+                                                    rose::ui::ChatEventType::
+                                                    ArtifactReady,
+                                                .artifact =
+                                                    std::move(artifact)
+                                            });
+                                    }
+                                    if (!agentResult.pending.has_value())
+                                    {
+                                        throw std::runtime_error{
+                                            "Agent loop requested confirmation without pending state."
+                                        };
+                                    }
+
+                                    pendingAgentRun =
+                                        std::move(agentResult.pending);
+
+                                    chatBridge.postEvent(
+                                        rose::ui::ChatEvent{
+                                            .type =
+                                                rose::ui::ChatEventType::
+                                                AssistantStarted
+                                        });
+
+                                    chatBridge.postEvent(
+                                        rose::ui::ChatEvent{
+                                            .type =
+                                                rose::ui::ChatEventType::
+                                                AssistantFinished,
+                                            .text =
+                                                pendingAgentRun->confirmation.
+                                                    userFacingSummary
+                                        });
+
+                                    avatarController.handleActivity(
+                                        rose::core::RoseActivity::Idle);
+
+                                    continue;
+                                }
+
+                                for (auto& artifact : agentResult.artifacts)
+                                {
+                                    pendingArtifacts.push_back(
+                                        std::move(artifact));
+                                }
+
+                                input =
+                                    std::move(agentResult.userTextForResponse);
+
+                                transientContext =
+                                    std::move(agentResult.transientContext);
+                            }
+
 
                             bool responseStarted{
                                 false
@@ -705,6 +1049,21 @@ int main()
                                     .text =
                                         response.text
                                 });
+
+                            // Keep artifact ordering intuitive: Rose's final text
+                            // arrives first, then the generated artifact card(s).
+                            for (auto& artifact : pendingArtifacts)
+                            {
+                                chatBridge.postEvent(
+                                    rose::ui::ChatEvent{
+                                        .type =
+                                            rose::ui::ChatEventType::
+                                            ArtifactReady,
+
+                                        .artifact =
+                                            std::move(artifact)
+                                    });
+                            }
 
                             std::cout
                                 << "\n\n"

@@ -1,5 +1,6 @@
 #include "tools/ToolRegistry.h"
 
+#include <algorithm>
 #include <stdexcept>
 #include <string>
 #include <utility>
@@ -104,6 +105,16 @@ namespace rose::tools
             (void)id;
             result.push_back(tool->descriptor());
         }
+
+        // unordered_map iteration order is intentionally unspecified. Stable
+        // descriptor order keeps Agent control prompts deterministic as tools grow.
+        std::sort(
+            result.begin(),
+            result.end(),
+            [](const ToolDescriptor& left, const ToolDescriptor& right)
+            {
+                return left.id < right.id;
+            });
 
         return result;
     }

@@ -9,14 +9,25 @@
 namespace rose::tools
 {
 
-    // Broad risk categories used by the future permission/policy layer.
-    // The registry describes risk; it does not decide whether execution is allowed.
+    // Broad effect/risk category. Risk describes WHAT a tool can affect.
     enum class ToolRisk
     {
         ReadOnly,
         LocalWrite,
         Destructive,
         ExternalEffect
+    };
+
+
+    // Consent describes whether Rose policy may execute a proposed tool without
+    // an additional confirmation interaction.
+    //
+    // Defaulting to RequiresConfirmation is deliberate: newly added tools fail
+    // safe until their execution semantics are reviewed.
+    enum class ToolConsent
+    {
+        AutoAllowed,
+        RequiresConfirmation
     };
 
 
@@ -44,15 +55,15 @@ namespace rose::tools
         std::string displayName;
         std::string description;
         ToolRisk risk{ ToolRisk::ReadOnly };
+        ToolConsent consent{ ToolConsent::RequiresConfirmation };
         std::vector<ToolParameterDescriptor> parameters;
     };
 
 
     // Generic request envelope used at the ToolRegistry boundary.
     //
-    // Values remain strings for this first checkpoint so ToolRegistry itself does
-    // not need to know about JSON or a particular model's tool-call protocol.
-    // Individual tools validate and convert their own arguments.
+    // Values remain strings for this checkpoint so ToolRegistry does not depend
+    // on JSON or a particular model provider's native tool-call protocol.
     struct ToolRequest
     {
         std::string toolId;
