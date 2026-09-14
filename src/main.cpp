@@ -17,6 +17,8 @@
 #include "platform/TtfRuntime.h"
 #include "tools/AttachmentIngestion.h"
 #include "tools/GenerateImageTool.h"
+#include "tools/GenerateImageRegisteredTool.h"
+#include "tools/ToolRegistry.h"
 #include "tools/ReadFileTool.h"
 #include "ui/ChatBridge.h"
 #include "ui/SdlChatWindow.h"
@@ -239,132 +241,240 @@ int main()
                                 "models/imagegen/"
                                 "v1-5-pruned-emaonly.safetensors",
 
-                        // Keep the first diffusion test inside an explicit
-                        // budget while Qwen remains resident on the GPU.
-                        .maxVramAssignment =
-                            "cuda0=8"
-                    }
-                };
-
-                rose::tools::GenerateImageTool generateImageTool{
-                    imageGenerator,
-                    artifactStore
-                };
-
-
-                avatarController.handleActivity(
-                    rose::core::RoseActivity::Idle);
-
-                std::cout
-                    << "Local model initialized.\n"
-                    << "Input is now handled by Rose's SDL chat window.\n"
-                    << "Commands: "
-                    << "/image <prompt>, "
-                    << "/clear, "
-                    << "/log silent|normal|verbose, "
-                    << "/quit\n\n";
-
-
-                // =========================================================
-                // Conversation loop
-                // =========================================================
-
-                while (true)
-                {
-                    avatarController.handleActivity(
-                        rose::core::RoseActivity::Listening);
-
-                    std::optional<rose::input::UserSubmission>
-                        pendingSubmission =
-                            chatBridge.waitForUserSubmission();
-
-                    if (!pendingSubmission)
-                    {
-                        break;
-                    }
-
-                    rose::input::UserSubmission submission =
-                        std::move(*pendingSubmission);
-
-
-                    // -----------------------------------------------------
-                    // Submission metadata
-                    // -----------------------------------------------------
-                    //
-                    // Development commands are only recognized for text-only
-                    // submissions. A file whose name/content happens to look
-                    // like a command is never treated as one.
-
-                    const bool commandEligible =
-                        submission.attachments.empty();
-
-                    const std::string& submittedText =
-                        submission.text;
-
-                    std::cout
-                        << "You: "
-                        << submittedText;
-
-                    if (!submission.attachments.empty())
-                    {
-                        std::cout
-                            << " ["
-                            << submission.attachments.size()
-                            << " attachment";
-
-                        if (submission.attachments.size() != 1)
-                        {
-                            std::cout << 's';
+                            // Keep the first diffusion test inside an explicit
+                            // budget while Qwen remains resident on the GPU.
+                            .maxVramAssignment =
+                                "cuda0=8"
                         }
-
-                        std::cout << ']';
-                    }
-
-                    std::cout << '\n';
-
-
-                    // =====================================================
-                    // Development image-generation command
-                    // =====================================================
-                    //
-                    // This remains an explicit command only for this
-                    // checkpoint. ToolRegistry/Agent routing will replace it.
-
-                    constexpr std::string_view imageCommandPrefix{
-                        "/image "
                     };
 
-                    if (
-                        commandEligible
-                        && submittedText.starts_with(
-                            imageCommandPrefix))
-                    {
-                        try
-                        {
-                            const std::string prompt =
-                                submittedText.substr(
-                                    imageCommandPrefix.size());
+                    rose::tools::GenerateImageTool generateImageTool{
+                        imageGenerator,
+                        artifactStore
+                    };
 
-                            if (prompt.empty())
+
+                    // ---------------------------------------------------------
+                    // Tool registry
+                    // ---------------------------------------------------------
+                    //
+                    // ToolRegistry owns generic tool adapters. The adapter below
+                    // borrows GenerateImageTool, which stays alive for the entire
+                    // worker scope.
+                    //
+                    // This is the first step toward agent-selected tools: main no
+                    // longer calls GenerateImageTool directly. Every execution now
+                    // crosses the same generic ToolRequest/ToolResult boundary that
+                    // the Agent will use in the next checkpoint.
+
+                    rose::tools::ToolRegistry toolRegistry;
+
+                    toolRegistry.registerTool(
+                        std::make_unique<
+                            rose::tools::GenerateImageRegisteredTool>(
+                                generateImageTool));
+
+
+                    avatarController.handleActivity(
+                        rose::core::RoseActivity::Idle);
+
+                    std::cout
+                        << "Local model initialized.\n"
+                        << "Input is now handled by Rose's SDL chat window.\n"
+                        << "Commands: "
+                        << "/image <prompt>, "
+                        << "/tools, "
+                        << "/clear, "
+                        << "/log silent|normal|verbose, "
+                        << "/quit\n\n";
+
+
+                    // =========================================================
+                    // Conversation loop
+                    // =========================================================
+
+                    while (true)
+                    {
+                        avatarController.handleActivity(
+                            rose::core::RoseActivity::Listening);
+
+                        std::optional<rose::input::UserSubmission>
+                            pendingSubmission =
+                                chatBridge.waitForUserSubmission();
+
+                        if (!pendingSubmission)
+                        {
+                            break;
+                        }
+
+                        rose::input::UserSubmission submission =
+                            std::move(*pendingSubmission);
+
+
+                        // -----------------------------------------------------
+                        // Submission metadata
+                        // -----------------------------------------------------
+                        //
+                        // Development commands are only recognized for text-only
+                        // submissions. A file whose name/content happens to look
+                        // like a command is never treated as one.
+
+                        const bool commandEligible =
+                            submission.attachments.empty();
+
+                        const std::string& submittedText =
+                            submission.text;
+
+                        std::cout
+                            << "You: "
+                            << submittedText;
+
+                        if (!submission.attachments.empty())
+                        {
+                            std::cout
+                                << " ["
+                                << submission.attachments.size()
+                                << " attachment";
+
+                            if (submission.attachments.size() != 1)
                             {
-                                throw std::runtime_error{
-                                    "Usage: /image <prompt>"
-                                };
+                                std::cout << 's';
                             }
 
-                            avatarController.handleActivity(
-                                rose::core::RoseActivity::Working);
+                            std::cout << ']';
+                        }
 
-                            rose::imagegen::ImageGenerationRequest request;
-                            request.prompt = prompt;
-                            request.width = 512;
-                            request.height = 512;
-                            request.steps = 20;
-                            request.cfgScale = 7.0f;
+                        std::cout << '\n';
 
-                            rose::artifacts::Artifact artifact =
-                                generateImageTool.generate(
-                                    request);
+
+                        // =====================================================
+                        // Development image-generation command
+                        // =====================================================
+                        //
+                        // /image is still an explicit development command, but it no
+                        // longer knows anything about StableDiffusionCliGenerator or
+                        // GenerateImageTool. It builds a generic ToolRequest and asks
+                        // ToolRegistry to execute it.
+                        //
+                        // The next checkpoint can replace this command parser with an
+                        // Agent tool-selection pass without changing the tool itself.
+
+                        constexpr std::string_view imageCommandPrefix{
+                            "/image "
+                        };
+
+                        if (
+                            commandEligible
+                            && submittedText.starts_with(
+                                imageCommandPrefix))
+                        {
+                            try
+                            {
+                                const std::string prompt =
+                                    submittedText.substr(
+                                        imageCommandPrefix.size());
+
+                                if (prompt.empty())
+                                {
+                                    throw std::runtime_error{
+                                        "Usage: /image <prompt>"
+                                    };
+                                }
+
+                                avatarController.handleActivity(
+                                    rose::core::RoseActivity::Working);
+
+                                rose::tools::ToolRequest toolRequest{
+                                    .toolId = "generate_image",
+                                    .arguments = {
+                                        { "prompt", prompt },
+                                        { "width", "512" },
+                                        { "height", "512" },
+                                        { "steps", "20" },
+                                        { "cfg_scale", "7.0" }
+                                    }
+                                };
+
+                                rose::tools::ToolResult toolResult =
+                                    toolRegistry.execute(
+                                        toolRequest);
+
+                                chatBridge.postEvent(
+                                    rose::ui::ChatEvent{
+                                        .type =
+                                            rose::ui::ChatEventType::
+                                            AssistantStarted
+                                    });
+
+                                chatBridge.postEvent(
+                                    rose::ui::ChatEvent{
+                                        .type =
+                                            rose::ui::ChatEventType::
+                                            AssistantFinished,
+
+                                        .text =
+                                            toolResult.message
+                                    });
+
+                                for (auto& artifact : toolResult.artifacts)
+                                {
+                                    chatBridge.postEvent(
+                                        rose::ui::ChatEvent{
+                                            .type =
+                                                rose::ui::ChatEventType::
+                                                ArtifactReady,
+
+                                            .artifact =
+                                                std::move(artifact)
+                                        });
+                                }
+
+                                avatarController.handleActivity(
+                                    rose::core::RoseActivity::Idle);
+                            }
+                            catch (const std::exception& exception)
+                            {
+                                avatarController.handleActivity(
+                                    rose::core::RoseActivity::Confused);
+
+                                chatBridge.postEvent(
+                                    rose::ui::ChatEvent{
+                                        .type =
+                                            rose::ui::ChatEventType::Error,
+
+                                        .text =
+                                            std::string{
+                                                "Image generation failed: "
+                                            }
+                                            + exception.what()
+                                    });
+                            }
+
+                            continue;
+                        }
+
+
+                        // =====================================================
+                        // Tool registry diagnostic command
+                        // =====================================================
+
+                        if (
+                            commandEligible
+                            && submittedText == "/tools")
+                        {
+                            std::string toolList =
+                                "Registered Rose tools:\n";
+
+                            for (const rose::tools::ToolDescriptor& descriptor :
+                                 toolRegistry.descriptors())
+                            {
+                                toolList +=
+                                    "- "
+                                    + descriptor.id
+                                    + ": "
+                                    + descriptor.description
+                                    + "\n";
+                            }
 
                             chatBridge.postEvent(
                                 rose::ui::ChatEvent{
@@ -380,22 +490,234 @@ int main()
                                         AssistantFinished,
 
                                     .text =
-                                        "Generated the image locally "
-                                        "with stable-diffusion.cpp."
+                                        std::move(toolList)
                                 });
+
+                            continue;
+                        }
+
+
+                        // =====================================================
+                        // Development/control commands
+                        // =====================================================
+
+                        if (
+                            commandEligible
+                            && submittedText == "/log silent")
+                        {
+                            logger.setMode(
+                                rose::logging::LogMode::Silent);
+
+                            std::cout
+                                << "Logging mode: Silent.\n\n";
+
+                            continue;
+                        }
+
+                        if (
+                            commandEligible
+                            && submittedText == "/log normal")
+                        {
+                            logger.setMode(
+                                rose::logging::LogMode::Normal);
+
+                            std::cout
+                                << "Logging mode: Normal.\n\n";
+
+                            continue;
+                        }
+
+                        if (
+                            commandEligible
+                            && submittedText == "/log verbose")
+                        {
+                            logger.setMode(
+                                rose::logging::LogMode::Verbose);
+
+                            std::cout
+                                << "Logging mode: Verbose.\n\n";
+
+                            continue;
+                        }
+
+                        if (
+                            commandEligible
+                            && submittedText == "/quit")
+                        {
+                            chatBridge.requestShutdown();
+                            break;
+                        }
+
+                        if (
+                            commandEligible
+                            && submittedText == "/clear")
+                        {
+                            roseCore.clearConversation();
 
                             chatBridge.postEvent(
                                 rose::ui::ChatEvent{
                                     .type =
                                         rose::ui::ChatEventType::
-                                        ArtifactReady,
-
-                                    .artifact =
-                                        std::move(artifact)
+                                        ConversationCleared
                                 });
 
-                            avatarController.handleActivity(
-                                rose::core::RoseActivity::Idle);
+                            continue;
+                        }
+
+
+                        // Nothing typed and nothing attached means no request.
+                        // Attachment-only requests are valid and are handled below.
+                        if (
+                            submittedText.empty()
+                            && submission.attachments.empty())
+                        {
+                            continue;
+                        }
+
+
+                        // =====================================================
+                        // One complete normal Rose request
+                        // =====================================================
+                        //
+                        // This try/catch is deliberately INSIDE the loop. A bad
+                        // attachment, context overflow, or inference failure must
+                        // reject only this request, not kill Rose's worker.
+
+                        try
+                        {
+                            rose::tools::IngestedUserSubmission ingested =
+                                attachmentIngestion.ingest(
+                                    std::move(submission));
+
+                            std::string input =
+                                std::move(
+                                    ingested.userText);
+
+                            std::string transientContext =
+                                std::move(
+                                    ingested.transientContext);
+
+                            bool responseStarted{
+                                false
+                            };
+
+
+                            // -------------------------------------------------
+                            // Rose activity -> avatar
+                            // -------------------------------------------------
+
+                            const rose::core::RoseActivityCallback onActivity =
+                                [&avatarController](
+                                    const rose::core::RoseActivity activity)
+                                {
+                                    avatarController.handleActivity(
+                                        activity);
+                                };
+
+
+                            // -------------------------------------------------
+                            // Model streaming -> UI
+                            // -------------------------------------------------
+                            //
+                            // The callback lends a string_view only for this call.
+                            // ChatBridge therefore receives an owned std::string.
+
+                            const rose::model::ModelTextCallback onText =
+                                [&chatBridge,
+                                 &responseStarted](
+                                    const std::string_view text)
+                                {
+                                    if (text.empty())
+                                    {
+                                        return;
+                                    }
+
+                                    if (!responseStarted)
+                                    {
+                                        chatBridge.postEvent(
+                                            rose::ui::ChatEvent{
+                                                .type =
+                                                    rose::ui::ChatEventType::
+                                                    AssistantStarted
+                                            });
+
+                                        responseStarted = true;
+                                    }
+
+                                    chatBridge.postEvent(
+                                        rose::ui::ChatEvent{
+                                            .type =
+                                                rose::ui::ChatEventType::
+                                                AssistantText,
+
+                                            .text =
+                                                std::string{
+                                                    text
+                                                }
+                                        });
+                                };
+
+
+                            // -------------------------------------------------
+                            // Generate normal Rose response
+                            // -------------------------------------------------
+
+                            const rose::model::ModelResponse response =
+                                roseCore.processMessage(
+                                    input,
+                                    transientContext,
+                                    onText,
+                                    onActivity);
+
+                            // Defensive fallback for providers that return only a
+                            // final response and never invoke the streaming callback.
+                            if (!responseStarted)
+                            {
+                                chatBridge.postEvent(
+                                    rose::ui::ChatEvent{
+                                        .type =
+                                            rose::ui::ChatEventType::
+                                            AssistantStarted
+                                    });
+
+                                if (!response.text.empty())
+                                {
+                                    chatBridge.postEvent(
+                                        rose::ui::ChatEvent{
+                                            .type =
+                                                rose::ui::ChatEventType::
+                                                AssistantText,
+
+                                            .text =
+                                                response.text
+                                        });
+                                }
+                            }
+
+                            // AssistantFinished carries the canonical final text.
+                            // The UI parses rich presentation only at this point.
+                            chatBridge.postEvent(
+                                rose::ui::ChatEvent{
+                                    .type =
+                                        rose::ui::ChatEventType::
+                                        AssistantFinished,
+
+                                    .text =
+                                        response.text
+                                });
+
+                            std::cout
+                                << "\n\n"
+                                << "[Generated tokens: "
+                                << response.generatedTokens
+                                << "]\n"
+                                << "[Finish reason: "
+                                << (
+                                    response.finishReason
+                                    == rose::model::ModelFinishReason::TokenLimit
+                                    ? "Token limit"
+                                    : "End of generation")
+                                << "]\n\n";
                         }
                         catch (const std::exception& exception)
                         {
@@ -409,286 +731,42 @@ int main()
 
                                     .text =
                                         std::string{
-                                            "Image generation failed: "
+                                            "Rose could not complete that request: "
                                         }
                                         + exception.what()
                                 });
+
+                            // No break: Rose remains alive for the next request.
                         }
-
-                        continue;
                     }
 
 
-                    // =====================================================
-                    // Development/control commands
-                    // =====================================================
+                    avatarController.handleActivity(
+                        rose::core::RoseActivity::Idle);
+                }
+                catch (...)
+                {
+                    // Only worker initialization/lifetime failures belong here.
+                    workerException =
+                        std::current_exception();
 
-                    if (
-                        commandEligible
-                        && submittedText == "/log silent")
-                    {
-                        logger.setMode(
-                            rose::logging::LogMode::Silent);
+                    avatarController.handleActivity(
+                        rose::core::RoseActivity::Confused);
 
-                        std::cout
-                            << "Logging mode: Silent.\n\n";
+                    chatBridge.postEvent(
+                        rose::ui::ChatEvent{
+                            .type =
+                                rose::ui::ChatEventType::Error,
 
-                        continue;
-                    }
-
-                    if (
-                        commandEligible
-                        && submittedText == "/log normal")
-                    {
-                        logger.setMode(
-                            rose::logging::LogMode::Normal);
-
-                        std::cout
-                            << "Logging mode: Normal.\n\n";
-
-                        continue;
-                    }
-
-                    if (
-                        commandEligible
-                        && submittedText == "/log verbose")
-                    {
-                        logger.setMode(
-                            rose::logging::LogMode::Verbose);
-
-                        std::cout
-                            << "Logging mode: Verbose.\n\n";
-
-                        continue;
-                    }
-
-                    if (
-                        commandEligible
-                        && submittedText == "/quit")
-                    {
-                        chatBridge.requestShutdown();
-                        break;
-                    }
-
-                    if (
-                        commandEligible
-                        && submittedText == "/clear")
-                    {
-                        roseCore.clearConversation();
-
-                        chatBridge.postEvent(
-                            rose::ui::ChatEvent{
-                                .type =
-                                    rose::ui::ChatEventType::
-                                    ConversationCleared
-                            });
-
-                        continue;
-                    }
-
-
-                    // Nothing typed and nothing attached means no request.
-                    // Attachment-only requests are valid and are handled below.
-                    if (
-                        submittedText.empty()
-                        && submission.attachments.empty())
-                    {
-                        continue;
-                    }
-
-
-                    // =====================================================
-                    // One complete normal Rose request
-                    // =====================================================
-                    //
-                    // This try/catch is deliberately INSIDE the loop. A bad
-                    // attachment, context overflow, or inference failure must
-                    // reject only this request, not kill Rose's worker.
-
-                    try
-                    {
-                        rose::tools::IngestedUserSubmission ingested =
-                            attachmentIngestion.ingest(
-                                std::move(submission));
-
-                        std::string input =
-                            std::move(
-                                ingested.userText);
-
-                        std::string transientContext =
-                            std::move(
-                                ingested.transientContext);
-
-                        bool responseStarted{
-                            false
-                        };
-
-
-                        // -------------------------------------------------
-                        // Rose activity -> avatar
-                        // -------------------------------------------------
-
-                        const rose::core::RoseActivityCallback onActivity =
-                            [&avatarController](
-                                const rose::core::RoseActivity activity)
-                            {
-                                avatarController.handleActivity(
-                                    activity);
-                            };
-
-
-                        // -------------------------------------------------
-                        // Model streaming -> UI
-                        // -------------------------------------------------
-                        //
-                        // The callback lends a string_view only for this call.
-                        // ChatBridge therefore receives an owned std::string.
-
-                        const rose::model::ModelTextCallback onText =
-                            [&chatBridge,
-                             &responseStarted](
-                                const std::string_view text)
-                            {
-                                if (text.empty())
-                                {
-                                    return;
-                                }
-
-                                if (!responseStarted)
-                                {
-                                    chatBridge.postEvent(
-                                        rose::ui::ChatEvent{
-                                            .type =
-                                                rose::ui::ChatEventType::
-                                                AssistantStarted
-                                        });
-
-                                    responseStarted = true;
-                                }
-
-                                chatBridge.postEvent(
-                                    rose::ui::ChatEvent{
-                                        .type =
-                                            rose::ui::ChatEventType::
-                                            AssistantText,
-
-                                        .text =
-                                            std::string{
-                                                text
-                                            }
-                                    });
-                            };
-
-
-                        // -------------------------------------------------
-                        // Generate normal Rose response
-                        // -------------------------------------------------
-
-                        const rose::model::ModelResponse response =
-                            roseCore.processMessage(
-                                input,
-                                transientContext,
-                                onText,
-                                onActivity);
-
-                        // Defensive fallback for providers that return only a
-                        // final response and never invoke the streaming callback.
-                        if (!responseStarted)
-                        {
-                            chatBridge.postEvent(
-                                rose::ui::ChatEvent{
-                                    .type =
-                                        rose::ui::ChatEventType::
-                                        AssistantStarted
-                                });
-
-                            if (!response.text.empty())
-                            {
-                                chatBridge.postEvent(
-                                    rose::ui::ChatEvent{
-                                        .type =
-                                            rose::ui::ChatEventType::
-                                            AssistantText,
-
-                                        .text =
-                                            response.text
-                                    });
-                            }
-                        }
-
-                        // AssistantFinished carries the canonical final text.
-                        // The UI parses rich presentation only at this point.
-                        chatBridge.postEvent(
-                            rose::ui::ChatEvent{
-                                .type =
-                                    rose::ui::ChatEventType::
-                                    AssistantFinished,
-
-                                .text =
-                                    response.text
-                            });
-
-                        std::cout
-                            << "\n\n"
-                            << "[Generated tokens: "
-                            << response.generatedTokens
-                            << "]\n"
-                            << "[Finish reason: "
-                            << (
-                                response.finishReason
-                                == rose::model::ModelFinishReason::TokenLimit
-                                ? "Token limit"
-                                : "End of generation")
-                            << "]\n\n";
-                    }
-                    catch (const std::exception& exception)
-                    {
-                        avatarController.handleActivity(
-                            rose::core::RoseActivity::Confused);
-
-                        chatBridge.postEvent(
-                            rose::ui::ChatEvent{
-                                .type =
-                                    rose::ui::ChatEventType::Error,
-
-                                .text =
-                                    std::string{
-                                        "Rose could not complete that request: "
-                                    }
-                                    + exception.what()
-                            });
-
-                        // No break: Rose remains alive for the next request.
-                    }
+                            .text =
+                                "Rose's conversation worker stopped unexpectedly."
+                        });
                 }
 
-
-                avatarController.handleActivity(
-                    rose::core::RoseActivity::Idle);
+                conversationFinished.store(
+                    true,
+                    std::memory_order_release);
             }
-            catch (...)
-            {
-                // Only worker initialization/lifetime failures belong here.
-                workerException =
-                    std::current_exception();
-
-                avatarController.handleActivity(
-                    rose::core::RoseActivity::Confused);
-
-                chatBridge.postEvent(
-                    rose::ui::ChatEvent{
-                        .type =
-                            rose::ui::ChatEventType::Error,
-
-                        .text =
-                            "Rose's conversation worker stopped unexpectedly."
-                    });
-            }
-
-            conversationFinished.store(
-                true,
-                std::memory_order_release);
-        }
         };
 
 

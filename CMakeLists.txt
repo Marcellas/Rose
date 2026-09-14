@@ -568,6 +568,13 @@ add_executable(Rose
 
     src/tools/GenerateImageTool.h
     src/tools/GenerateImageTool.cpp
+
+    src/tools/ToolTypes.h
+    src/tools/ITool.h
+    src/tools/ToolRegistry.h
+    src/tools/ToolRegistry.cpp
+    src/tools/GenerateImageRegisteredTool.h
+    src/tools/GenerateImageRegisteredTool.cpp
 )
 
 # =============================================================================
