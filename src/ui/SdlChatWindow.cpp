@@ -440,6 +440,28 @@ namespace rose::ui
             break;
 
 
+        case SDL_EVENT_MOUSE_BUTTON_DOWN:
+            if (event.button.windowID != windowId)
+            {
+                break;
+            }
+
+            if (
+                event.button.button == SDL_BUTTON_LEFT
+                || event.button.button == SDL_BUTTON_RIGHT)
+            {
+                const bool revealFolder =
+                    event.button.button == SDL_BUTTON_RIGHT;
+
+                (void) transcript_->handlePointerDown(
+                    event.button.x,
+                    event.button.y,
+                    revealFolder);
+            }
+
+            break;
+
+
         case SDL_EVENT_MOUSE_WHEEL:
             if (event.wheel.windowID != windowId)
             {
@@ -1105,6 +1127,15 @@ namespace rose::ui
             // remain literal so partial Markdown/LaTeX cannot corrupt presentation.
             transcript_->finishAssistantResponse(
                 event.text);
+            break;
+
+
+        case ChatEventType::ArtifactReady:
+            if (event.artifact.has_value())
+            {
+                transcript_->appendArtifact(
+                    std::move(*event.artifact));
+            }
             break;
 
 

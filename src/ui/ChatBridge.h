@@ -1,5 +1,6 @@
 #pragma once
 
+#include "artifacts/Artifact.h"
 #include "input/UserSubmission.h"
 
 #include <condition_variable>
@@ -17,6 +18,7 @@ namespace rose::ui
         AssistantStarted,
         AssistantText,
         AssistantFinished,
+        ArtifactReady,
         ConversationCleared,
         Error
     };
@@ -29,6 +31,10 @@ namespace rose::ui
         };
 
         std::string text;
+
+        // Only populated for ArtifactReady. A value type is deliberate: the worker
+        // transfers a durable path/metadata description, never an SDL resource.
+        std::optional<artifacts::Artifact> artifact;
     };
 
 
@@ -38,8 +44,8 @@ namespace rose::ui
     //
     // Thread boundary between the SDL/UI thread and Rose's worker.
     //
-    // UI -> worker now moves one UserSubmission so text and attachments remain one
-    // coherent request. All strings/paths are owned on both sides of the queue.
+    // UI -> worker moves one UserSubmission so text and attachments remain one
+    // coherent request. Worker -> UI can now also move Artifact descriptors.
     class ChatBridge final
     {
     public:

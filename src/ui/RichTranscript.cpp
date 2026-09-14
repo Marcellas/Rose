@@ -4,9 +4,19 @@
 #include "ui/RichResponseRenderer.h"
 
 #include <SDL3/SDL.h>
+#include <SDL3_image/SDL_image.h>
+
+#ifdef _WIN32
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <Windows.h>
+#include <Shellapi.h>
+#endif
 
 #include <algorithm>
 #include <memory>
+#include <optional>
 #include <string>
 #include <utility>
 #include <vector>
@@ -14,14 +24,105 @@
 namespace rose::ui
 {
 
+    namespace
+    {
+        [[nodiscard]]
+        bool pointInside(
+            const SDL_FRect& rect,
+            const float x,
+            const float y) noexcept
+        {
+            return
+                x >= rect.x
+                && y >= rect.y
+                && x <= rect.x + rect.w
+                && y <= rect.y + rect.h;
+        }
+
+
+#ifdef _WIN32
+        void openArtifact(
+            const std::filesystem::path& path)
+        {
+            ShellExecuteW(
+                nullptr,
+                L"open",
+                path.c_str(),
+                nullptr,
+                nullptr,
+                SW_SHOWNORMAL);
+        }
+
+
+        void revealArtifact(
+            const std::filesystem::path& path)
+        {
+            std::wstring arguments{
+                L"/select,\""
+            };
+
+            arguments += path.wstring();
+            arguments += L"\"";
+
+            ShellExecuteW(
+                nullptr,
+                L"open",
+                L"explorer.exe",
+                arguments.c_str(),
+                nullptr,
+                SW_SHOWNORMAL);
+        }
+#else
+        void openArtifact(
+            const std::filesystem::path&)
+        {
+        }
+
+        void revealArtifact(
+            const std::filesystem::path&)
+        {
+        }
+#endif
+    }
+
+
     struct RichTranscript::Impl
     {
+        struct TextureDeleter
+        {
+            void operator()(
+                SDL_Texture* texture) const noexcept
+            {
+                if (texture != nullptr)
+                {
+                    SDL_DestroyTexture(texture);
+                }
+            }
+        };
+
+        using TexturePtr =
+            std::unique_ptr<SDL_Texture, TextureDeleter>;
+
+
+        struct ArtifactVisual
+        {
+            artifacts::Artifact artifact;
+            TexturePtr texture;
+            float sourceWidth{ 0.0f };
+            float sourceHeight{ 0.0f };
+            SDL_FRect lastPreviewRect{};
+            bool hasClickablePreview{ false };
+        };
+
+
         struct Entry
         {
             ResponseDocument document;
             std::string copyText;
             RichResponseLayout layout;
             int layoutWidth{ 0 };
+            int renderHeight{ 0 };
+            std::optional<ArtifactVisual> artifact;
         };
 
 
@@ -39,6 +140,8 @@ namespace rose::ui
         float scrollOffset_{ 0.0f };
         float maxScrollOffset_{ 0.0f };
         bool followLatest_{ true };
+
+        SDL_FRect lastViewport_{};
 
 
         explicit Impl(
@@ -66,7 +169,9 @@ namespace rose::ui
                     .document = std::move(document),
                     .copyText = std::move(copyText),
                     .layout = {},
-                    .layoutWidth = 0
+                    .layoutWidth = 0,
+                    .renderHeight = 0,
+                    .artifact = std::nullopt
                 });
         }
 
@@ -81,8 +186,6 @@ namespace rose::ui
                 std::string{ "You: " }
                     + std::string{ text });
 
-            // Submitting a new prompt means the user has intentionally returned to
-            // the live edge of the conversation.
             followLatest_ = true;
         }
 
@@ -152,6 +255,62 @@ namespace rose::ui
         }
 
 
+        void appendArtifact(
+            artifacts::Artifact artifact)
+        {
+            std::string description =
+                "Generated image: "
+                + artifact.displayName
+                + "\n"
+                + artifact.path.string()
+                + "\nLeft-click the preview to open it; right-click to reveal it in Explorer.";
+
+            Entry entry;
+            entry.document =
+                makePlainResponseDocument(
+                    "Rose: ",
+                    description);
+            entry.copyText =
+                std::string{ "Rose artifact: " }
+                + artifact.path.string();
+
+            ArtifactVisual visual;
+            visual.artifact =
+                std::move(artifact);
+
+            if (
+                visual.artifact.kind
+                == artifacts::ArtifactKind::Image)
+            {
+                const std::string pathText =
+                    visual.artifact.path.string();
+
+                SDL_Texture* rawTexture =
+                    IMG_LoadTexture(
+                        &renderer_,
+                        pathText.c_str());
+
+                if (rawTexture != nullptr)
+                {
+                    visual.texture.reset(rawTexture);
+
+                    SDL_GetTextureSize(
+                        rawTexture,
+                        &visual.sourceWidth,
+                        &visual.sourceHeight);
+                }
+            }
+
+            entry.artifact =
+                std::move(visual);
+
+            entries_.push_back(
+                std::move(entry));
+
+            followLatest_ = true;
+        }
+
+
         void appendError(
             const std::string_view text)
         {
@@ -167,7 +326,6 @@ namespace rose::ui
             streamingLayout_ = {};
             streamingLayoutWidth_ = 0;
             streamingDirty_ = true;
-
             followLatest_ = true;
         }
 
@@ -185,6 +343,7 @@ namespace rose::ui
             scrollOffset_ = 0.0f;
             maxScrollOffset_ = 0.0f;
             followLatest_ = true;
+            lastViewport_ = {};
         }
 
 
@@ -192,7 +351,6 @@ namespace rose::ui
         std::string copyableText() const
         {
             std::string result;
-
             bool haveContent{ false };
 
             for (const Entry& entry : entries_)
@@ -239,21 +397,85 @@ namespace rose::ui
         }
 
 
+        [[nodiscard]]
+        int artifactPreviewHeight(
+            const ArtifactVisual& artifact,
+            const int width) const noexcept
+        {
+            if (
+                !artifact.texture
+                || artifact.sourceWidth <= 0.0f
+                || artifact.sourceHeight <= 0.0f)
+            {
+                return 0;
+            }
+
+            const float targetWidth =
+                std::min(
+                    static_cast<float>(width),
+                    artifact.sourceWidth);
+
+            const float scale =
+                targetWidth
+                / artifact.sourceWidth;
+
+            constexpr float maximumPreviewHeight{ 360.0f };
+
+            return static_cast<int>(
+                std::min(
+                    maximumPreviewHeight,
+                    artifact.sourceHeight * scale));
+        }
+
+
         void ensureLayouts(
             const int width)
         {
+            constexpr int artifactGap{ 10 };
+            constexpr int cardPadding{ 10 };
+
             for (Entry& entry : entries_)
             {
                 if (
                     !entry.layout
                     || entry.layoutWidth != width)
                 {
+                    const int documentWidth =
+                        entry.artifact.has_value()
+                            ? std::max(
+                                1,
+                                width - cardPadding * 2)
+                            : width;
+
                     entry.layout =
                         responseRenderer_.layout(
                             entry.document,
-                            width);
+                            documentWidth);
 
                     entry.layoutWidth = width;
+
+                    if (entry.artifact.has_value())
+                    {
+                        const int previewHeight =
+                            artifactPreviewHeight(
+                                *entry.artifact,
+                                documentWidth);
+
+                        entry.renderHeight =
+                            cardPadding
+                            + entry.layout.height()
+                            + (
+                                previewHeight > 0
+                                    ? artifactGap
+                                        + previewHeight
+                                    : 0)
+                            + cardPadding;
+                    }
+                    else
+                    {
+                        entry.renderHeight =
+                            entry.layout.height();
+                    }
                 }
             }
 
@@ -303,7 +525,7 @@ namespace rose::ui
                     height += turnGap;
                 }
 
-                height += entry.layout.height();
+                height += entry.renderHeight;
                 haveContent = true;
             }
 
@@ -321,6 +543,51 @@ namespace rose::ui
         }
 
 
+        [[nodiscard]]
+        bool handlePointerDown(
+            const float x,
+            const float y,
+            const bool revealFolder)
+        {
+            if (!pointInside(lastViewport_, x, y))
+            {
+                return false;
+            }
+
+            for (Entry& entry : entries_)
+            {
+                if (
+                    !entry.artifact.has_value()
+                    || !entry.artifact->hasClickablePreview)
+                {
+                    continue;
+                }
+
+                if (
+                    pointInside(
+                        entry.artifact->lastPreviewRect,
+                        x,
+                        y))
+                {
+                    if (revealFolder)
+                    {
+                        revealArtifact(
+                            entry.artifact->artifact.path);
+                    }
+                    else
+                    {
+                        openArtifact(
+                            entry.artifact->artifact.path);
+                    }
+
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
+
         void render(
             const int x,
             const int y,
@@ -335,6 +602,8 @@ namespace rose::ui
             constexpr int scrollbarWidth{ 8 };
             constexpr int scrollbarGap{ 10 };
             constexpr int turnGap{ 12 };
+            constexpr int cardPadding{ 10 };
+            constexpr int artifactGap{ 10 };
 
             const int contentWidth =
                 std::max(
@@ -366,6 +635,21 @@ namespace rose::ui
                     0.0f,
                     maxScrollOffset_);
 
+            lastViewport_ =
+                SDL_FRect{
+                    static_cast<float>(x),
+                    static_cast<float>(y),
+                    static_cast<float>(contentWidth),
+                    static_cast<float>(height)
+                };
+
+            for (Entry& entry : entries_)
+            {
+                if (entry.artifact.has_value())
+                {
+                    entry.artifact->hasClickablePreview = false;
+                }
+            }
 
             const SDL_Rect clip{
                 x,
@@ -375,12 +659,11 @@ namespace rose::ui
             };
 
             if (!SDL_SetRenderClipRect(
-                &renderer_,
-                &clip))
+                    &renderer_,
+                    &clip))
             {
                 return;
             }
-
 
             float cursorY =
                 static_cast<float>(y)
@@ -388,26 +671,125 @@ namespace rose::ui
 
             bool haveContent{ false };
 
-            for (const Entry& entry : entries_)
+            for (Entry& entry : entries_)
             {
                 if (haveContent)
                 {
-                    cursorY += static_cast<float>(turnGap);
+                    cursorY +=
+                        static_cast<float>(turnGap);
                 }
 
                 const float entryBottom =
                     cursorY
                     + static_cast<float>(
-                        entry.layout.height());
+                        entry.renderHeight);
 
                 if (
                     entryBottom >= static_cast<float>(y)
                     && cursorY <= static_cast<float>(y + height))
                 {
-                    responseRenderer_.draw(
-                        entry.layout,
-                        static_cast<float>(x),
-                        cursorY);
+                    if (!entry.artifact.has_value())
+                    {
+                        responseRenderer_.draw(
+                            entry.layout,
+                            static_cast<float>(x),
+                            cursorY);
+                    }
+                    else
+                    {
+                        const float cardX =
+                            static_cast<float>(x);
+
+                        const float cardWidth =
+                            static_cast<float>(contentWidth);
+
+                        const SDL_FRect card{
+                            cardX,
+                            cursorY,
+                            cardWidth,
+                            static_cast<float>(
+                                entry.renderHeight)
+                        };
+
+                        SDL_SetRenderDrawColor(
+                            &renderer_,
+                            42,
+                            40,
+                            49,
+                            255);
+
+                        SDL_RenderFillRect(
+                            &renderer_,
+                            &card);
+
+                        responseRenderer_.draw(
+                            entry.layout,
+                            card.x
+                                + static_cast<float>(cardPadding),
+                            card.y
+                                + static_cast<float>(cardPadding));
+
+                        ArtifactVisual& visual =
+                            *entry.artifact;
+
+                        const int previewHeight =
+                            artifactPreviewHeight(
+                                visual,
+                                contentWidth
+                                    - cardPadding * 2);
+
+                        if (
+                            visual.texture
+                            && previewHeight > 0)
+                        {
+                            const float availableWidth =
+                                static_cast<float>(
+                                    contentWidth
+                                    - cardPadding * 2);
+
+                            float previewWidth =
+                                std::min(
+                                    availableWidth,
+                                    visual.sourceWidth);
+
+                            const float heightScale =
+                                static_cast<float>(previewHeight)
+                                / visual.sourceHeight;
+
+                            previewWidth =
+                                std::min(
+                                    previewWidth,
+                                    visual.sourceWidth
+                                    * heightScale);
+
+                            const SDL_FRect destination{
+                                card.x
+                                    + static_cast<float>(cardPadding),
+                                card.y
+                                    + static_cast<float>(cardPadding)
+                                    + static_cast<float>(entry.layout.height())
+                                    + static_cast<float>(artifactGap),
+                                previewWidth,
+                                static_cast<float>(previewHeight)
+                            };
+
+                            SDL_RenderTexture(
+                                &renderer_,
+                                visual.texture.get(),
+                                nullptr,
+                                &destination);
+
+                            visual.lastPreviewRect =
+                                destination;
+
+                            visual.hasClickablePreview =
+                                destination.y
+                                    + destination.h
+                                    >= static_cast<float>(y)
+                                && destination.y
+                                    <= static_cast<float>(y + height);
+                        }
+                    }
                 }
 
                 cursorY = entryBottom;
@@ -419,7 +801,8 @@ namespace rose::ui
             {
                 if (haveContent)
                 {
-                    cursorY += static_cast<float>(turnGap);
+                    cursorY +=
+                        static_cast<float>(turnGap);
                 }
 
                 const float streamBottom =
@@ -438,17 +821,14 @@ namespace rose::ui
                 }
             }
 
-
             SDL_SetRenderClipRect(
                 &renderer_,
                 nullptr);
-
 
             if (maxScrollOffset_ <= 0.0f)
             {
                 return;
             }
-
 
             const SDL_FRect scrollbarTrack{
                 static_cast<float>(
@@ -468,7 +848,6 @@ namespace rose::ui
             SDL_RenderFillRect(
                 &renderer_,
                 &scrollbarTrack);
-
 
             const float visibleFraction =
                 std::clamp(
@@ -494,7 +873,8 @@ namespace rose::ui
 
             const float scrollFraction =
                 maxScrollOffset_ > 0.0f
-                    ? scrollOffset_ / maxScrollOffset_
+                    ? scrollOffset_
+                        / maxScrollOffset_
                     : 0.0f;
 
             const SDL_FRect scrollbarThumb{
@@ -567,6 +947,14 @@ namespace rose::ui
     }
 
 
+    void RichTranscript::appendArtifact(
+        artifacts::Artifact artifact)
+    {
+        impl_->appendArtifact(
+            std::move(artifact));
+    }
+
+
     void RichTranscript::appendError(
         const std::string_view text)
     {
@@ -590,6 +978,18 @@ namespace rose::ui
         const float deltaPixels)
     {
         impl_->scrollBy(deltaPixels);
+    }
+
+
+    bool RichTranscript::handlePointerDown(
+        const float x,
+        const float y,
+        const bool revealFolder)
+    {
+        return impl_->handlePointerDown(
+            x,
+            y,
+            revealFolder);
     }
 
 

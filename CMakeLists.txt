@@ -544,6 +544,30 @@ add_executable(Rose
 
     src/ui/SdlChatWindow.h
     src/ui/SdlChatWindow.cpp
+
+        # =========================================================================
+    # Generated artifacts
+    # =========================================================================
+
+    src/artifacts/Artifact.h
+    src/artifacts/ArtifactStore.h
+    src/artifacts/ArtifactStore.cpp
+
+    # =========================================================================
+    # Local image generation
+    # =========================================================================
+
+    src/imagegen/ImageGenerationTypes.h
+    src/imagegen/IImageGenerator.h
+    src/imagegen/StableDiffusionCliGenerator.h
+    src/imagegen/StableDiffusionCliGenerator.cpp
+
+    # =========================================================================
+    # Image generation tool
+    # =========================================================================
+
+    src/tools/GenerateImageTool.h
+    src/tools/GenerateImageTool.cpp
 )
 
 # =============================================================================
