@@ -1,19 +1,16 @@
 #pragma once
 
+#include "input/UserSubmission.h"
+
 #include <condition_variable>
 #include <deque>
 #include <mutex>
 #include <optional>
 #include <string>
 
-
 namespace rose::ui
 {
 
-    // -----------------------------------------------------------------------------
-    // ChatEventType
-    // -----------------------------------------------------------------------------
-    //
     // Messages sent FROM Rose's worker TO the graphical frontend.
     enum class ChatEventType
     {
@@ -25,9 +22,6 @@ namespace rose::ui
     };
 
 
-    // -----------------------------------------------------------------------------
-    // ChatEvent
-    // -----------------------------------------------------------------------------
     struct ChatEvent
     {
         ChatEventType type{
@@ -42,84 +36,43 @@ namespace rose::ui
     // ChatBridge
     // -----------------------------------------------------------------------------
     //
-    // Thread boundary between Rose's graphical UI and the RoseCore worker.
+    // Thread boundary between the SDL/UI thread and Rose's worker.
     //
-    // DATA FLOW:
-    //
-    //     UI thread
-    //         |
-    //         | submitUserMessage()
-    //         v
-    //     request queue
-    //         |
-    //         v
-    //     Rose worker
-    //
-    // and:
-    //
-    //     Rose worker
-    //         |
-    //         | postEvent()
-    //         v
-    //     event queue
-    //         |
-    //         v
-    //     UI thread
-    //
-    // Neither queue exposes references to its internal storage.
-    //
-    // Strings are moved across the boundary so ownership is explicit.
+    // UI -> worker now moves one UserSubmission so text and attachments remain one
+    // coherent request. All strings/paths are owned on both sides of the queue.
     class ChatBridge final
     {
     public:
-        // -------------------------------------------------------------------------
-        // UI -> worker
-        // -------------------------------------------------------------------------
+        void submitUserSubmission(
+            input::UserSubmission submission);
 
+        [[nodiscard]]
+        std::optional<input::UserSubmission>
+            waitForUserSubmission();
+
+        // Convenience path retained for simple text-only callers/tests.
         void submitUserMessage(
             std::string message);
 
 
-        // Blocks the worker until:
-        //
-        //     - a message is available, or
-        //     - shutdown has been requested.
-        //
-        // nullopt means shutdown.
-        [[nodiscard]]
-        std::optional<std::string> waitForUserMessage();
-
-
-        // -------------------------------------------------------------------------
-        // worker -> UI
-        // -------------------------------------------------------------------------
-
         void postEvent(
             ChatEvent event);
 
-
-        // Non-blocking because the SDL main loop must never wait on the model.
         [[nodiscard]]
         std::optional<ChatEvent> tryPopEvent();
 
 
-        // -------------------------------------------------------------------------
-        // Lifetime / shutdown
-        // -------------------------------------------------------------------------
-
         void requestShutdown();
-
 
         [[nodiscard]]
         bool shutdownRequested() const;
-
 
     private:
         mutable std::mutex mutex_;
 
         std::condition_variable requestAvailable_;
 
-        std::deque<std::string> userMessages_;
+        std::deque<input::UserSubmission> userSubmissions_;
 
         std::deque<ChatEvent> events_;
 

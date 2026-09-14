@@ -18,20 +18,21 @@ namespace rose::core
         conversation::ConversationConfig config)
         : modelProvider_{
             std::move(modelProvider)
-        },
-        logger_{
-          logger
-        },
-        conversation_{
-          config
-        },
-        conversationStore_{
-          conversationStore
         }
+        , logger_{ logger }
+        , conversation_{ config }
+        , conversationStore_{ conversationStore }
     {
+        if (!modelProvider_)
+        {
+            throw std::invalid_argument{
+                "RoseCore requires a valid ModelProvider."
+            };
+        }
+
+
         auto storedTurns =
             conversationStore_.loadTurns();
-
 
         for (auto& turn : storedTurns)
         {
@@ -47,6 +48,20 @@ namespace rose::core
         const model::ModelTextCallback& onText,
         const RoseActivityCallback& onActivity)
     {
+        return processMessage(
+            message,
+            std::string_view{},
+            onText,
+            onActivity);
+    }
+
+
+    model::ModelResponse RoseCore::processMessage(
+        const std::string_view message,
+        const std::string_view transientContext,
+        const model::ModelTextCallback& onText,
+        const RoseActivityCallback& onActivity)
+    {
         if (message.empty())
         {
             throw std::invalid_argument{
@@ -55,29 +70,17 @@ namespace rose::core
         }
 
 
-        // -------------------------------------------------------------------------
-        // Own the current user's input.
-        // -------------------------------------------------------------------------
-        //
-        // The incoming string_view only borrows the caller's text buffer.
-        //
-        // Conversation history needs its own copy because it must remain valid
-        // after this function returns.
-        std::string userText{ message };
+        // Canonical text is what the user actually asked. It is the only user text
+        // that will be persisted after a successful turn.
+        std::string userText{
+            message
+        };
 
-
-        // -------------------------------------------------------------------------
-        // Retrieve Rose's recent working conversation.
-        // -------------------------------------------------------------------------
 
         std::vector<model::ModelMessage> requestMessages =
             conversation_.buildWorkingContext();
 
 
-        // Temporary diagnostic.
-        //
-        // Once our logging subsystem exists, this information will become a
-        // structured Verbose-level event instead of console output.
         logger_.debug(
             "RoseCore",
             "Stored history messages: "
@@ -91,21 +94,6 @@ namespace rose::core
                 requestMessages.size()));
 
 
-        // -------------------------------------------------------------------------
-        // Rose's system identity
-        // -------------------------------------------------------------------------
-        //
-        // IMPORTANT:
-        //
-        // This belongs to RoseCore / eventually Agent configuration.
-        //
-        // It does NOT belong in LlamaCppModelProvider because the language model is
-        // not Rose. If we replace Qwen with another model tomorrow, Rose should
-        // retain the same identity.
-        //
-        // /no_think is currently a Qwen instruction. We are using it temporarily
-        // while Qwen is Rose's active local model. Later reasoning preference will
-        // become a provider-neutral ModelRequest capability.
         requestMessages.insert(
             requestMessages.begin(),
             model::ModelMessage{
@@ -118,24 +106,41 @@ namespace rose::core
             });
 
 
-        // -------------------------------------------------------------------------
-        // Add the CURRENT user message.
-        // -------------------------------------------------------------------------
-        //
-        // It is not committed to Conversation yet. We only commit completed turns
-        // after model generation succeeds.
+        // Build a request-local version of the current message. Attached source
+        // material belongs here, not in the persisted canonical conversation turn.
+        std::string modelUserText =
+            userText;
+
+        if (!transientContext.empty())
+        {
+            modelUserText +=
+                "\n\n<rose_transient_context>\n";
+
+            modelUserText.append(
+                transientContext.data(),
+                transientContext.size());
+
+            modelUserText +=
+                "\n</rose_transient_context>";
+        }
+
+
         requestMessages.push_back(
             model::ModelMessage{
                 .role = model::ModelRole::User,
-                .content = userText
+                .content = std::move(modelUserText)
             });
 
 
         model::ModelRequest request{
             .messages = std::move(requestMessages),
-            .sampling = {},
+            .sampling = {}
         };
 
+
+        // Exact provider-side token accounting decides the final working context.
+        // We remove only complete historical user/assistant pairs; the system prompt
+        // and current user submission (including its transient attachments) survive.
         while (true)
         {
             const model::ModelContextUsage usage =
@@ -145,32 +150,19 @@ namespace rose::core
             logger_.debug(
                 "RoseCore",
                 "Context usage: "
-                + std::to_string(
-                    usage.promptTokens)
+                + std::to_string(usage.promptTokens)
                 + " prompt + "
-                + std::to_string(
-                    usage.requestedGenerationTokens)
+                + std::to_string(usage.requestedGenerationTokens)
                 + " response = "
-                + std::to_string(
-                    usage.totalRequestedTokens())
+                + std::to_string(usage.totalRequestedTokens())
                 + " / "
-                + std::to_string(
-                    usage.contextCapacity));
+                + std::to_string(usage.contextCapacity));
 
             if (usage.fits())
             {
                 break;
             }
 
-
-            // Expected layout:
-            //
-            // [0] system
-            // [1...] historical user/assistant turns
-            // [last] current user
-            //
-            // If there is at least one historical complete turn, remove the oldest
-            // user + assistant pair while preserving system and current input.
             if (request.messages.size() >= 4)
             {
                 logger_.debug(
@@ -185,43 +177,12 @@ namespace rose::core
                 continue;
             }
 
-
-            // No historical context remains.
-            //
-            // Therefore the system prompt + current user message + requested output
-            // cannot fit even by themselves.
             throw std::runtime_error{
-                "This message is too large to process in one request."
+                "This message and its attached context are too large to process in one request."
             };
         }
 
-        // -------------------------------------------------------------------------
-// Generate the assistant response.
-// -------------------------------------------------------------------------
-//
-// Activity flow:
-//
-//     Thinking
-//        |
-//        | first visible streamed text
-//        v
-//     Speaking
-//        |
-//        | response successfully completes
-//        v
-//       Idle
-//
-// The provider still owns inference. RoseCore only translates model activity
-// into provider-independent Rose activity.
-//
-// IMPORTANT:
-// We use streaming when either:
-//
-//     - the frontend wants streamed text, OR
-//     - an activity observer wants to know when Rose begins speaking.
-//
-// The second case matters because detecting the first visible response chunk is
-// what lets Rose transition accurately from Thinking to Speaking.
+
         if (onActivity)
         {
             onActivity(
@@ -231,24 +192,10 @@ namespace rose::core
 
         bool speakingStarted{ false };
 
-
-        // -------------------------------------------------------------------------
-        // Forward visible model text.
-        // -------------------------------------------------------------------------
-        //
-        // This callback wraps the caller's normal text callback.
-        //
-        // It has two jobs:
-        //
-        //     1. Detect the first visible piece of assistant output.
-        //     2. Forward that piece unchanged to the actual frontend.
-        //
-        // The callback does not retain the string_view. Its lifetime remains limited to
-        // the provider callback invocation.
         const model::ModelTextCallback streamedText =
             [&onText,
-            &onActivity,
-            &speakingStarted](
+             &onActivity,
+             &speakingStarted](
                 const std::string_view text)
             {
                 if (
@@ -264,7 +211,6 @@ namespace rose::core
                     }
                 }
 
-
                 if (onText)
                 {
                     onText(text);
@@ -274,12 +220,8 @@ namespace rose::core
 
         model::ModelResponse response;
 
-
         try
         {
-            // Streaming is required not only when the frontend wants text chunks, but
-            // also when Rose needs to detect the first visible chunk for activity
-            // transitions.
             if (onText || onActivity)
             {
                 response =
@@ -294,19 +236,13 @@ namespace rose::core
                         request);
             }
 
-            // Persist the complete successful turn before considering it committed to
-            // Rose's active conversation.
-            //
-            // If disk persistence fails, the exception propagates instead of silently
-            // allowing RAM and disk history to diverge.
+
+            // Persistence contains the user's canonical request, not the contents of
+            // every file Rose happened to read for this turn.
             conversationStore_.appendTurn(
                 userText,
                 response.text);
 
-            // Commit only after generation succeeds.
-            //
-            // Streaming output may already have been shown to the user, but incomplete
-            // or failed responses must not contaminate Conversation history.
             conversation_.commitTurn(
                 std::move(userText),
                 response.text);
@@ -320,10 +256,6 @@ namespace rose::core
         }
         catch (...)
         {
-            // For now Confused represents an operation that failed.
-            //
-            // Later we may separate recoverable confusion from actual Error state, but
-            // keeping one failure state is sufficient for the MVP.
             if (onActivity)
             {
                 onActivity(
@@ -338,20 +270,14 @@ namespace rose::core
     }
 
 
-        void RoseCore::clearConversation()
-        {
-            // Clear persistent storage first.
-            //
-            // If disk deletion fails, leave the in-memory conversation intact rather
-            // than pretending the historical conversation was erased.
-            conversationStore_.clear();
-
-            conversation_.clear();
-        }
+    void RoseCore::clearConversation()
+    {
+        conversationStore_.clear();
+        conversation_.clear();
+    }
 
 
-    std::size_t
-        RoseCore::conversationMessageCount() const noexcept
+    std::size_t RoseCore::conversationMessageCount() const noexcept
     {
         return conversation_.storedMessageCount();
     }

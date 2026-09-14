@@ -2,47 +2,43 @@
 
 #include <utility>
 
-
 namespace rose::ui
 {
 
-    void ChatBridge::submitUserMessage(
-        std::string message)
+    void ChatBridge::submitUserSubmission(
+        input::UserSubmission submission)
     {
-        if (message.empty())
+        if (
+            submission.text.empty()
+            && submission.attachments.empty())
         {
             return;
         }
-
 
         {
             std::lock_guard lock{
                 mutex_
             };
 
-
             if (shutdownRequested_)
             {
                 return;
             }
 
-
-            userMessages_.push_back(
-                std::move(message));
+            userSubmissions_.push_back(
+                std::move(submission));
         }
-
 
         requestAvailable_.notify_one();
     }
 
 
-    std::optional<std::string>
-        ChatBridge::waitForUserMessage()
+    std::optional<input::UserSubmission>
+        ChatBridge::waitForUserSubmission()
     {
         std::unique_lock lock{
             mutex_
         };
-
 
         requestAvailable_.wait(
             lock,
@@ -50,27 +46,34 @@ namespace rose::ui
             {
                 return
                     shutdownRequested_
-                    || !userMessages_.empty();
+                    || !userSubmissions_.empty();
             });
-
 
         if (
             shutdownRequested_
-            && userMessages_.empty())
+            && userSubmissions_.empty())
         {
             return std::nullopt;
         }
 
-
-        std::string message =
+        input::UserSubmission submission =
             std::move(
-                userMessages_.front());
+                userSubmissions_.front());
+
+        userSubmissions_.pop_front();
+
+        return submission;
+    }
 
 
-        userMessages_.pop_front();
-
-
-        return message;
+    void ChatBridge::submitUserMessage(
+        std::string message)
+    {
+        submitUserSubmission(
+            input::UserSubmission{
+                .text = std::move(message),
+                .attachments = {}
+            });
     }
 
 
@@ -81,12 +84,10 @@ namespace rose::ui
             mutex_
         };
 
-
         if (shutdownRequested_)
         {
             return;
         }
-
 
         events_.push_back(
             std::move(event));
@@ -100,20 +101,16 @@ namespace rose::ui
             mutex_
         };
 
-
         if (events_.empty())
         {
             return std::nullopt;
         }
 
-
         ChatEvent event =
             std::move(
                 events_.front());
 
-
         events_.pop_front();
-
 
         return event;
     }
@@ -128,7 +125,6 @@ namespace rose::ui
 
             shutdownRequested_ = true;
         }
-
 
         requestAvailable_.notify_all();
     }

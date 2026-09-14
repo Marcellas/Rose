@@ -46,6 +46,14 @@ set(LLAMA_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
 set(LLAMA_BUILD_TOOLS OFF CACHE BOOL "" FORCE)
 set(LLAMA_BUILD_SERVER OFF CACHE BOOL "" FORCE)
 
+# Build llama.cpp's multimodal library without enabling its full tools suite.
+# RoseVisionWorker links libmtmd directly in its own helper process.
+set(LLAMA_BUILD_MTMD ON CACHE BOOL "" FORCE)
+
+# This checkpoint handles still images only. Disabling mtmd video avoids adding
+# ffmpeg/subprocess behavior to Rose before video is actually a product feature.
+set(MTMD_VIDEO OFF CACHE BOOL "" FORCE)
+
 add_subdirectory(external/llama.cpp
     EXCLUDE_FROM_ALL)
 
@@ -137,6 +145,321 @@ add_subdirectory(
 )
 
 # =============================================================================
+# MicroTeX - native LaTeX math layout
+# =============================================================================
+
+set(HAVE_LOG OFF CACHE BOOL "" FORCE)
+set(GRAPHICS_DEBUG OFF CACHE BOOL "" FORCE)
+set(BUILD_EXAMPLE OFF CACHE BOOL "" FORCE)
+
+# =============================================================================
+# MicroTeX
+# =============================================================================
+#
+# MicroTeX uses `add_library(LaTeX "")` without specifying STATIC or SHARED.
+#
+# Rose's SDL dependencies enable BUILD_SHARED_LIBS, which would accidentally
+# turn MicroTeX into a Windows DLL. MicroTeX is not configured as an exported
+# Windows DLL, so no usable LaTeX.lib import library is produced.
+#
+# Temporarily force static-library behavior only while configuring MicroTeX,
+# then restore Rose's previous BUILD_SHARED_LIBS value.
+
+if(DEFINED BUILD_SHARED_LIBS)
+    set(ROSE_SAVED_BUILD_SHARED_LIBS "${BUILD_SHARED_LIBS}")
+    set(ROSE_HAD_BUILD_SHARED_LIBS TRUE)
+else()
+    set(ROSE_HAD_BUILD_SHARED_LIBS FALSE)
+endif()
+
+
+set(BUILD_SHARED_LIBS OFF)
+
+add_subdirectory(
+    external/MicroTex
+    EXCLUDE_FROM_ALL
+)
+
+
+if(ROSE_HAD_BUILD_SHARED_LIBS)
+    set(
+        BUILD_SHARED_LIBS
+        "${ROSE_SAVED_BUILD_SHARED_LIBS}"
+    )
+else()
+    unset(BUILD_SHARED_LIBS)
+endif()
+
+
+if(WIN32)
+
+    # Do not propagate MicroTeX's _HAS_STD_BYTE=0 setting into Rose.
+    set_property(
+        TARGET LaTeX
+        PROPERTY INTERFACE_COMPILE_DEFINITIONS
+            BUILD_WIN32
+    )
+
+
+    # MicroTeX's core library does not add its Win32 graphics implementation
+    # to the LaTeX target itself. Rose consumes the library directly, so add
+    # that implementation here.
+    target_sources(
+        LaTeX
+        PRIVATE
+            "${CMAKE_CURRENT_SOURCE_DIR}/external/MicroTex/src/platform/gdi_win/graphic_win32.cpp"
+    )
+
+
+    target_link_libraries(
+        LaTeX
+        PRIVATE
+            gdiplus
+    )
+
+endif()
+
+
+# =============================================================================
+# RoseMathSandbox
+# =============================================================================
+
+add_executable(
+    RoseMathSandbox
+        src/ui/MathSandbox.cpp
+        src/ui/MathRenderer.cpp
+        src/platform/SdlRuntime.cpp
+)
+
+target_include_directories(
+    RoseMathSandbox
+    PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/src"
+)
+
+target_compile_features(
+    RoseMathSandbox
+    PRIVATE
+        cxx_std_20
+)
+
+set_target_properties(
+    RoseMathSandbox
+    PROPERTIES
+        CXX_EXTENSIONS OFF
+)
+
+target_link_libraries(
+    RoseMathSandbox
+    PRIVATE
+        SDL3::SDL3
+        LaTeX
+        gdiplus
+)
+
+
+if(WIN32)
+
+    add_custom_command(
+        TARGET RoseMathSandbox
+        POST_BUILD
+
+        COMMAND
+            ${CMAKE_COMMAND} -E copy_if_different
+            $<TARGET_RUNTIME_DLLS:RoseMathSandbox>
+            $<TARGET_FILE_DIR:RoseMathSandbox>
+
+        COMMAND_EXPAND_LISTS
+    )
+
+endif()
+# =============================================================================
+# PDFium - native PDF text extraction
+# =============================================================================
+#
+# Rose uses a pinned prebuilt PDFium package on Windows. Building PDFium from
+# source requires Chromium's GN/depot_tools toolchain and is intentionally kept
+# outside Rose's normal MSVC/CMake build.
+#
+# Expected layout after extracting pdfium-win-x64.tgz:
+#
+#     external/pdfium/include/fpdfview.h
+#     external/pdfium/include/fpdf_text.h
+#     external/pdfium/lib/pdfium.dll.lib
+#     external/pdfium/bin/pdfium.dll
+
+if(WIN32)
+
+    set(
+        ROSE_PDFIUM_ROOT
+        "${CMAKE_CURRENT_SOURCE_DIR}/external/pdfium"
+        CACHE PATH
+        "Path to Rose's unpacked PDFium binary distribution"
+    )
+
+    set(
+        ROSE_PDFIUM_INCLUDE_DIR
+        "${ROSE_PDFIUM_ROOT}/include"
+    )
+
+    set(
+        ROSE_PDFIUM_IMPORT_LIBRARY
+        "${ROSE_PDFIUM_ROOT}/lib/pdfium.dll.lib"
+    )
+
+    set(
+        ROSE_PDFIUM_RUNTIME_DLL
+        "${ROSE_PDFIUM_ROOT}/bin/pdfium.dll"
+    )
+
+    if(NOT EXISTS "${ROSE_PDFIUM_INCLUDE_DIR}/fpdfview.h")
+        message(FATAL_ERROR
+            "Rose PDF support requires PDFium headers under "
+            "${ROSE_PDFIUM_INCLUDE_DIR}. See README_PDF_SUPPORT.md."
+        )
+    endif()
+
+    if(NOT EXISTS "${ROSE_PDFIUM_IMPORT_LIBRARY}")
+        message(FATAL_ERROR
+            "Rose PDF support requires ${ROSE_PDFIUM_IMPORT_LIBRARY}. "
+            "See README_PDF_SUPPORT.md."
+        )
+    endif()
+
+    if(NOT EXISTS "${ROSE_PDFIUM_RUNTIME_DLL}")
+        message(FATAL_ERROR
+            "Rose PDF support requires ${ROSE_PDFIUM_RUNTIME_DLL}. "
+            "See README_PDF_SUPPORT.md."
+        )
+    endif()
+
+    add_library(
+        PDFium::PDFium
+        SHARED
+        IMPORTED
+        GLOBAL
+    )
+
+    set_target_properties(
+        PDFium::PDFium
+        PROPERTIES
+            IMPORTED_IMPLIB
+                "${ROSE_PDFIUM_IMPORT_LIBRARY}"
+            IMPORTED_LOCATION
+                "${ROSE_PDFIUM_RUNTIME_DLL}"
+            INTERFACE_INCLUDE_DIRECTORIES
+                "${ROSE_PDFIUM_INCLUDE_DIR}"
+    )
+
+endif()
+
+# =============================================================================
+# Rose OCR sandbox
+# =============================================================================
+#
+# Small dependency/behavior checkpoint. It proves that Rose can locate the local
+# Tesseract executable and OCR an image without loading llama.cpp or the full UI.
+
+add_executable(
+    RoseOcrSandbox
+        src/ocr/OcrSandbox.cpp
+        src/ocr/TesseractCliOcrEngine.cpp
+)
+
+target_include_directories(
+    RoseOcrSandbox
+    PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/src"
+)
+
+target_compile_features(
+    RoseOcrSandbox
+    PRIVATE
+        cxx_std_20
+)
+
+set_target_properties(
+    RoseOcrSandbox
+    PROPERTIES
+        CXX_EXTENSIONS OFF
+)
+
+
+# =============================================================================
+# Rose semantic-vision worker
+# =============================================================================
+#
+# The worker owns its own llama.cpp/libmtmd runtime in a separate process. This
+# prevents Rose.exe's existing text-model BackendRuntime from competing with a
+# second backend lifetime inside the same process. It also releases vision-model
+# VRAM automatically when one image request finishes.
+
+add_executable(
+    RoseVisionWorker
+        src/vision/VisionWorker.cpp
+)
+
+target_compile_features(
+    RoseVisionWorker
+    PRIVATE
+        cxx_std_20
+)
+
+set_target_properties(
+    RoseVisionWorker
+    PROPERTIES
+        CXX_EXTENSIONS OFF
+)
+
+target_link_libraries(
+    RoseVisionWorker
+    PRIVATE
+        llama
+        mtmd
+)
+
+
+# =============================================================================
+# Rose semantic-vision sandbox
+# =============================================================================
+#
+# Exercises the exact same process provider used by Rose without loading the
+# desktop UI, persistence, OCR, or Rose's normal text model.
+
+add_executable(
+    RoseVisionSandbox
+        src/vision/VisionSandbox.cpp
+        src/vision/VisionTypes.h
+        src/vision/IVisionProvider.h
+        src/vision/LlamaMtmdVisionProvider.h
+        src/vision/LlamaMtmdVisionProvider.cpp
+)
+
+target_include_directories(
+    RoseVisionSandbox
+    PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/src"
+)
+
+target_compile_features(
+    RoseVisionSandbox
+    PRIVATE
+        cxx_std_20
+)
+
+set_target_properties(
+    RoseVisionSandbox
+    PROPERTIES
+        CXX_EXTENSIONS OFF
+)
+
+add_dependencies(
+    RoseVisionSandbox
+    RoseVisionWorker
+)
+
+
+# =============================================================================
 # Rose executable
 # =============================================================================
 
@@ -182,8 +505,43 @@ add_executable(Rose
     src/persistence/FileConversationStore.h
     src/persistence/FileConversationStore.cpp
 
+    src/input/UserSubmission.h
+
+    src/ocr/OcrTypes.h
+    src/ocr/IOcrEngine.h
+    src/ocr/TesseractCliOcrEngine.h
+    src/ocr/TesseractCliOcrEngine.cpp
+
+    src/vision/VisionTypes.h
+    src/vision/IVisionProvider.h
+    src/vision/LlamaMtmdVisionProvider.h
+    src/vision/LlamaMtmdVisionProvider.cpp
+
+    src/permissions/PermissionSystem.h
+    src/permissions/PermissionSystem.cpp
+
+    src/tools/ReadFileTool.h
+    src/tools/ReadFileTool.cpp
+    src/tools/PdfTextExtractor.h
+    src/tools/PdfTextExtractor.cpp
+    src/tools/AttachmentIngestion.h
+    src/tools/AttachmentIngestion.cpp
+
     src/ui/ChatBridge.h
     src/ui/ChatBridge.cpp
+
+    src/ui/ResponseDocument.h
+    src/ui/ResponseParser.h
+    src/ui/ResponseParser.cpp
+
+    src/ui/MathRenderer.h
+    src/ui/MathRenderer.cpp
+
+    src/ui/RichResponseRenderer.h
+    src/ui/RichResponseRenderer.cpp
+    src/ui/RichTranscript.h
+    src/ui/RichTranscript.cpp
+
     src/ui/SdlChatWindow.h
     src/ui/SdlChatWindow.cpp
 )
@@ -211,6 +569,13 @@ set_target_properties(
     Rose
     PROPERTIES
         CXX_EXTENSIONS OFF
+)
+
+# Rose invokes the semantic-vision helper by executable path at runtime. Make the
+# worker an explicit build dependency without linking libmtmd into Rose.exe.
+add_dependencies(
+    Rose
+    RoseVisionWorker
 )
 
 # ------------------------------------------------------------------------------
@@ -291,6 +656,21 @@ target_link_libraries(
         SDL3_image::SDL3_image
 )
 
+
+if(WIN32)
+
+    # Rich response math is an implementation detail of Rose's Windows UI.
+    # MicroTeX is static, so its native GDI+ dependency is linked into Rose here.
+    target_link_libraries(
+        Rose
+        PRIVATE
+            LaTeX
+            gdiplus
+            PDFium::PDFium
+    )
+
+endif()
+
 # =============================================================================
 # Runtime dependencies
 # =============================================================================
@@ -312,6 +692,19 @@ if(WIN32)
             ${CMAKE_COMMAND} -E copy_if_different
             $<TARGET_RUNTIME_DLLS:Rose>
             $<TARGET_FILE_DIR:Rose>
+
+        COMMAND_EXPAND_LISTS
+    )
+
+
+    add_custom_command(
+        TARGET RoseVisionWorker
+        POST_BUILD
+
+        COMMAND
+            ${CMAKE_COMMAND} -E copy_if_different
+            $<TARGET_RUNTIME_DLLS:RoseVisionWorker>
+            $<TARGET_FILE_DIR:RoseVisionWorker>
 
         COMMAND_EXPAND_LISTS
     )
@@ -362,6 +755,36 @@ if(MSVC)
             /utf-8
     )
 
+
+    target_compile_options(
+        RoseVisionWorker
+        PRIVATE
+            /W4
+            /permissive-
+            /Zc:__cplusplus
+            /utf-8
+    )
+
+
+    target_compile_options(
+        RoseVisionSandbox
+        PRIVATE
+            /W4
+            /permissive-
+            /Zc:__cplusplus
+            /utf-8
+    )
+
+
+    target_compile_options(
+        RoseOcrSandbox
+        PRIVATE
+            /W4
+            /permissive-
+            /Zc:__cplusplus
+            /utf-8
+    )
+
 else()
 
     target_compile_options(
@@ -375,6 +798,33 @@ else()
 
     target_compile_options(
         RoseAvatarSandbox
+        PRIVATE
+            -Wall
+            -Wextra
+            -Wpedantic
+    )
+
+
+    target_compile_options(
+        RoseVisionWorker
+        PRIVATE
+            -Wall
+            -Wextra
+            -Wpedantic
+    )
+
+
+    target_compile_options(
+        RoseVisionSandbox
+        PRIVATE
+            -Wall
+            -Wextra
+            -Wpedantic
+    )
+
+
+    target_compile_options(
+        RoseOcrSandbox
         PRIVATE
             -Wall
             -Wextra

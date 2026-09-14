@@ -13,6 +13,11 @@
 #include "platform/TtfRuntime.h"
 #include "ui/ChatBridge.h"
 #include "ui/SdlChatWindow.h"
+#include "permissions/PermissionSystem.h"
+#include "tools/ReadFileTool.h"
+#include "tools/AttachmentIngestion.h"
+#include "ocr/TesseractCliOcrEngine.h"
+#include "vision/LlamaMtmdVisionProvider.h"
 
 #include <SDL3/SDL.h>
 
@@ -247,6 +252,53 @@ int main()
                         conversationStore
                     };
 
+                    rose::permissions::PermissionSystem permissionSystem;
+
+                    rose::tools::ReadFileTool readFileTool{
+                        permissionSystem
+                    };
+
+
+                    auto ocrEngine =
+                        std::make_unique<
+                        rose::ocr::TesseractCliOcrEngine>();
+
+
+                    auto visionProvider =
+                        std::make_unique<
+                        rose::vision::LlamaMtmdVisionProvider>(
+                            rose::vision::LlamaMtmdVisionConfig{
+                                .modelPath =
+                                    "models/vision/Qwen3VL-8B-Instruct-Q4_K_M.gguf",
+
+                                .mmprojPath =
+                                    "models/vision/mmproj-Qwen3VL-8B-Instruct-Q8_0.gguf",
+
+                                .contextSize =
+                                    4096,
+
+                                .maxGeneratedTokens =
+                                    512,
+
+                                .gpuLayers =
+                                    999,
+
+                                .mmprojUseGpu =
+                                    true,
+
+                                .imageMaxTokens =
+                                    1536
+                            });
+
+
+                    rose::tools::AttachmentIngestion attachmentIngestion{
+                        permissionSystem,
+                        readFileTool,
+                        std::move(ocrEngine),
+                        std::move(visionProvider)
+                    };
+
+
 
                     avatarController.handleActivity(
                         rose::core::RoseActivity::Idle);
@@ -280,131 +332,181 @@ int main()
                         //
                         // nullopt means shutdown has been requested.
 
-                        std::optional<std::string> pendingInput =
-                            chatBridge.waitForUserMessage();
+                        std::optional<rose::input::UserSubmission> pendingSubmission =
+                            chatBridge.waitForUserSubmission();
 
-
-                        if (!pendingInput)
+                        if (!pendingSubmission)
                         {
                             break;
                         }
 
+                        rose::input::UserSubmission submission =
+                            std::move(*pendingSubmission);
 
-                        std::string input =
-                            std::move(
-                                *pendingInput);
+                        // -----------------------------------------------------
+                        // Submission metadata
+                        // -----------------------------------------------------
+                        //
+                        // At this point we have not ingested the files yet.
+                        //
+                        // submission.text is still the user's canonical text.
+                        // submission.attachments contains only paths selected/dropped
+                        // for this one request.
+
+                        const bool commandEligible =
+                            submission.attachments.empty();
+
+                        const std::string& submittedText =
+                            submission.text;
 
 
                         // Temporary development diagnostic.
+                        //
+                        // Do not use `input` here because the model-ready input does
+                        // not exist until after AttachmentIngestion below.
                         std::cout
                             << "You: "
-                            << input
-                            << '\n';
+                            << submittedText;
+
+                        if (!submission.attachments.empty())
+                        {
+                            std::cout
+                                << " ["
+                                << submission.attachments.size()
+                                << " attachment";
+
+                            if (submission.attachments.size() != 1)
+                            {
+                                std::cout << 's';
+                            }
+
+                            std::cout << ']';
+                        }
+
+                        std::cout << '\n';
 
 
                         // =====================================================
                         // Development logging commands
                         // =====================================================
 
-                        if (input == "/log silent")
+                        if (
+                            commandEligible
+                            && submittedText == "/log silent")
                         {
                             logger.setMode(
                                 rose::logging::LogMode::Silent);
 
-
                             std::cout
                                 << "Logging mode: Silent.\n\n";
-
 
                             continue;
                         }
 
 
-                        if (input == "/log normal")
+                        if (
+                            commandEligible
+                            && submittedText == "/log normal")
                         {
                             logger.setMode(
                                 rose::logging::LogMode::Normal);
 
-
                             std::cout
                                 << "Logging mode: Normal.\n\n";
-
 
                             continue;
                         }
 
 
-                        if (input == "/log verbose")
+                        if (
+                            commandEligible
+                            && submittedText == "/log verbose")
                         {
                             logger.setMode(
                                 rose::logging::LogMode::Verbose);
 
-
                             std::cout
                                 << "Logging mode: Verbose.\n\n";
-
 
                             continue;
                         }
 
 
-                        // =====================================================
-                        // Application commands
-                        // =====================================================
-
-                        if (input == "/quit")
+                        if (
+                            commandEligible
+                            && submittedText == "/quit")
                         {
                             chatBridge.requestShutdown();
-
                             break;
                         }
 
 
-                        if (input == "/clear")
+                        if (
+                            commandEligible
+                            && submittedText == "/clear")
                         {
                             roseCore.clearConversation();
-
 
                             chatBridge.postEvent(
                                 rose::ui::ChatEvent{
                                     .type =
-                                        rose::ui::ChatEventType::
-                                            ConversationCleared
+                                        rose::ui::ChatEventType::ConversationCleared
                                 });
-
 
                             continue;
                         }
 
 
-                        if (input.empty())
+                        // Nothing typed and nothing attached means there is no request.
+                        //
+                        // Keep this check BEFORE ingestion because an attachment-only
+                        // submission is valid and AttachmentIngestion will supply the
+                        // default "Please analyze the attached file(s)." user message.
+                        if (
+                            submittedText.empty()
+                            && submission.attachments.empty())
                         {
                             continue;
                         }
 
 
                         // =====================================================
-                        // One user/model request
+                        // One complete user request
                         // =====================================================
                         //
-                        // This try/catch is deliberately INSIDE the conversation
-                        // loop.
+                        // EVERYTHING that can fail because of this particular
+                        // submission belongs inside this try:
                         //
-                        // A failure processing one message must not terminate
-                        // Rose.
+                        //     file permission
+                        //     file opening
+                        //     attachment parsing
+                        //     context construction
+                        //     model inference
+                        //     persistence
                         //
-                        // Examples of recoverable request failures:
-                        //
-                        //     context overflow
-                        //     oversized user input
-                        //     inference request failure
-                        //     persistence write failure
-                        //
-                        // Fatal worker initialization failures are still caught
-                        // by the outer worker try/catch.
+                        // A bad PDF must not kill Rose's worker.
 
                         try
                         {
+                            // -------------------------------------------------
+                            // Attachment ingestion
+                            // -------------------------------------------------
+
+                            rose::tools::IngestedUserSubmission ingested =
+                                attachmentIngestion.ingest(
+                                    std::move(submission));
+
+
+                            std::string input =
+                                std::move(
+                                    ingested.userText);
+
+
+                            std::string transientContext =
+                                std::move(
+                                    ingested.transientContext);
+
+
                             bool responseStarted{
                                 false
                             };
@@ -417,8 +519,7 @@ int main()
                             const rose::core::RoseActivityCallback
                                 onActivity =
                                 [&avatarController](
-                                    const rose::core::RoseActivity
-                                        activity)
+                                    const rose::core::RoseActivity activity)
                                 {
                                     avatarController.handleActivity(
                                         activity);
@@ -426,20 +527,13 @@ int main()
 
 
                             // -------------------------------------------------
-                            // Model streaming -> graphical chat
+                            // Streaming response -> UI
                             // -------------------------------------------------
-                            //
-                            // ModelTextCallback only lends us its string_view
-                            // during this callback.
-                            //
-                            // ChatBridge owns events after this function
-                            // returns, so streamed text is copied into an owned
-                            // std::string before crossing the thread boundary.
 
                             const rose::model::ModelTextCallback
                                 onText =
                                 [&chatBridge,
-                                 &responseStarted](
+                                &responseStarted](
                                     const std::string_view text)
                                 {
                                     if (text.empty())
@@ -459,8 +553,7 @@ int main()
                                             });
 
 
-                                        responseStarted =
-                                            true;
+                                        responseStarted = true;
                                     }
 
 
@@ -480,26 +573,16 @@ int main()
 
 
                             // -------------------------------------------------
-                            // Generate exactly ONE response for this input
+                            // Generate response
                             // -------------------------------------------------
 
                             const rose::model::ModelResponse response =
                                 roseCore.processMessage(
                                     input,
+                                    transientContext,
                                     onText,
                                     onActivity);
 
-
-                            // -------------------------------------------------
-                            // Defensive non-streaming fallback
-                            // -------------------------------------------------
-                            //
-                            // LlamaCppModelProvider currently streams.
-                            //
-                            // A future provider may implement generate() only
-                            // and therefore return the whole response at once.
-                            //
-                            // The frontend should work in either case.
 
                             if (!responseStarted)
                             {
@@ -528,14 +611,15 @@ int main()
                             }
 
 
-                            // Tell the frontend this response has completely
-                            // finished streaming.
                             chatBridge.postEvent(
                                 rose::ui::ChatEvent{
                                     .type =
                                         rose::ui::
                                         ChatEventType::
-                                        AssistantFinished
+                                        AssistantFinished,
+
+                                    .text =
+                                        response.text
                                 });
 
 
@@ -554,14 +638,6 @@ int main()
                         }
                         catch (const std::exception& exception)
                         {
-                            // ---------------------------------------------
-                            // Recoverable request failure
-                            // ---------------------------------------------
-                            //
-                            // RoseCore may already have published Confused,
-                            // but explicitly setting it here also covers
-                            // failures originating outside RoseCore.
-
                             avatarController.handleActivity(
                                 rose::core::RoseActivity::Confused);
 
@@ -569,7 +645,9 @@ int main()
                             chatBridge.postEvent(
                                 rose::ui::ChatEvent{
                                     .type =
-                                        rose::ui::ChatEventType::Error,
+                                        rose::ui::
+                                        ChatEventType::
+                                        Error,
 
                                     .text =
                                         std::string{
@@ -580,29 +658,22 @@ int main()
                                 });
 
 
-                            // Do NOT break.
-                            //
-                            // Rose returns to the top of the loop and accepts
-                            // another user message.
+                            // Important:
+                            // no break; Rose remains alive and accepts the
+                            // next submission.
                         }
                     }
 
 
-                    // Normal shutdown leaves Rose in a neutral state while the
+                    // Normal worker-loop shutdown leaves Rose neutral while
                     // worker-owned objects unwind.
                     avatarController.handleActivity(
                         rose::core::RoseActivity::Idle);
                 }
                 catch (...)
                 {
-                    // =========================================================
-                    // Fatal worker failure
-                    // =========================================================
-                    //
-                    // This path is reserved for failures outside an individual
-                    // user request, such as model initialization or persistent
-                    // conversation restoration.
-
+                    // Fatal worker failures are initialization/lifetime failures,
+                    // not errors caused by one user submission.
                     workerException =
                         std::current_exception();
 

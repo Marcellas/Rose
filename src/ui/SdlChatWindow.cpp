@@ -1,12 +1,15 @@
 #include "ui/SdlChatWindow.h"
+#include "ui/RichTranscript.h"
 
 #include <SDL3/SDL.h>
 #include <SDL3_ttf/SDL_ttf.h>
 
 #include <algorithm>
+#include <filesystem>
 #include <stdexcept>
 #include <string>
 #include <utility>
+#include <vector>
 #include <iostream>
 
 
@@ -153,44 +156,6 @@ namespace rose::ui
         }
 
 
-        // -------------------------------------------------------------------------
-        // Transcript text
-        // -------------------------------------------------------------------------
-
-        transcriptText_.reset(
-            TTF_CreateText(
-                textEngine_.get(),
-                font_.get(),
-                "",
-                0));
-
-
-        if (!transcriptText_)
-        {
-            throw std::runtime_error{
-                std::string{
-                    "Could not create Rose transcript text: "
-                }
-                + SDL_GetError()
-            };
-        }
-
-
-        if (!TTF_SetTextColor(
-            transcriptText_.get(),
-            235,
-            235,
-            240,
-            255))
-        {
-            throw std::runtime_error{
-                std::string{
-                    "Could not set Rose transcript color: "
-                }
-                + SDL_GetError()
-            };
-        }
-
         inputTextObject_.reset(
             TTF_CreateText(
                 textEngine_.get(),
@@ -224,6 +189,54 @@ namespace rose::ui
                 + SDL_GetError()
             };
         }
+
+
+        attachmentTextObject_.reset(
+            TTF_CreateText(
+                textEngine_.get(),
+                font_.get(),
+                "",
+                0));
+
+        if (!attachmentTextObject_)
+        {
+            throw std::runtime_error{
+                std::string{
+                    "Could not create Rose attachment text: "
+                }
+                + SDL_GetError()
+            };
+        }
+
+        if (!TTF_SetTextColor(
+            attachmentTextObject_.get(),
+            194,
+            190,
+            210,
+            255))
+        {
+            throw std::runtime_error{
+                std::string{
+                    "Could not set Rose attachment text color: "
+                }
+                + SDL_GetError()
+            };
+        }
+
+        // -------------------------------------------------------------------------
+        // Rich transcript renderer
+        // -------------------------------------------------------------------------
+        //
+        // Completed responses are parsed and laid out only for presentation. The
+        // model/conversation/persistence layers continue to own the canonical text.
+        transcript_ =
+            std::make_unique<RichTranscript>(
+                *renderer_,
+                *textEngine_,
+                absoluteFontPath,
+                std::filesystem::path{
+                    "external/MicroTex/res"
+                });
 
         // -------------------------------------------------------------------------
         // Text input
@@ -280,11 +293,9 @@ namespace rose::ui
 
             if (event.text.text != nullptr)
             {
-                inputText_ +=
-                    event.text.text;
+                insertInputText(
+                    event.text.text);
             }
-
-            inputTextDirty_ = true;
 
             break;
 
@@ -296,18 +307,110 @@ namespace rose::ui
             }
 
 
+            {
+                const bool controlDown =
+                    (event.key.mod & SDL_KMOD_CTRL) != 0;
+
+                const bool shiftDown =
+                    (event.key.mod & SDL_KMOD_SHIFT) != 0;
+
+                if (controlDown)
+                {
+                    if (event.key.key == SDLK_V)
+                    {
+                        pasteClipboardIntoComposer();
+                        break;
+                    }
+
+                    if (event.key.key == SDLK_C)
+                    {
+                        if (shiftDown)
+                        {
+                            copyTranscriptToClipboard();
+                        }
+                        else
+                        {
+                            copyComposerToClipboard();
+                        }
+
+                        break;
+                    }
+
+                    if (event.key.key == SDLK_X)
+                    {
+                        cutComposerToClipboard();
+                        break;
+                    }
+
+                    if (event.key.key == SDLK_BACKSPACE)
+                    {
+                        removeLastPendingAttachment();
+                        break;
+                    }
+                }
+            }
+
+
             switch (event.key.key)
             {
             case SDLK_RETURN:
-                submitInput();
+            case SDLK_KP_ENTER:
+                // Enter sends. Shift+Enter inserts a real newline into the canonical
+                // input buffer. Visual word wrapping itself never modifies inputText_.
+                if ((event.key.mod & SDL_KMOD_SHIFT) != 0)
+                {
+                    insertInputText(
+                        "\n");
+                }
+                else
+                {
+                    submitInput();
+                }
+
                 break;
 
 
             case SDLK_BACKSPACE:
-                eraseLastUtf8CodePoint();
+                erasePreviousUtf8CodePoint();
+                break;
 
-                inputTextDirty_ = true;
 
+            case SDLK_DELETE:
+                eraseNextUtf8CodePoint();
+                break;
+
+
+            case SDLK_LEFT:
+                moveInputCursorLeft();
+                break;
+
+
+            case SDLK_RIGHT:
+                moveInputCursorRight();
+                break;
+
+
+            case SDLK_UP:
+                moveInputCursorVertical(-1);
+                break;
+
+
+            case SDLK_DOWN:
+                moveInputCursorVertical(1);
+                break;
+
+
+            case SDLK_HOME:
+                inputCursorByteOffset_ = 0;
+                resetPreferredCaretX();
+                break;
+
+
+            case SDLK_END:
+                inputCursorByteOffset_ =
+                    inputText_.size();
+
+                resetPreferredCaretX();
                 break;
 
 
@@ -320,6 +423,22 @@ namespace rose::ui
             }
 
             break;
+
+
+        case SDL_EVENT_DROP_FILE:
+            // The central SDL pump sends every event to SdlChatWindow. Accept file
+            // drops from either Rose window so the user can drop a file on the chat
+            // surface OR directly on Rose's avatar.
+            if (event.drop.data != nullptr)
+            {
+                // SDL owns event.drop.data. Copy it immediately into Rose-owned
+                // storage before this event leaves the central pump.
+                addDroppedFile(
+                    event.drop.data);
+            }
+
+            break;
+
 
         case SDL_EVENT_MOUSE_WHEEL:
             if (event.wheel.windowID != windowId)
@@ -334,8 +453,7 @@ namespace rose::ui
 
 
                 // SDL reports natural/trackpad scrolling through the FLIPPED flag.
-                //
-                // Normalize it so the rest of Rose's scrolling code has one meaning.
+                // Normalize it so the rest of Rose's transcript scrolling has one meaning.
                 if (
                     event.wheel.direction
                     == SDL_MOUSEWHEEL_FLIPPED)
@@ -345,34 +463,14 @@ namespace rose::ui
                 }
 
 
-                // This is deliberately a UI constant rather than tying scrolling
-                // directly to font line height. It gives reasonably smooth scrolling
-                // with both mouse wheels and trackpads.
                 constexpr float scrollPixelsPerUnit{
                     48.0f
                 };
 
 
-                transcriptScrollOffset_ =
-                    std::clamp(
-                        transcriptScrollOffset_
-                        - wheelY
-                        * scrollPixelsPerUnit,
-
-                        0.0f,
-                        transcriptMaxScrollOffset_);
-
-
-                // If the user reaches the bottom again, resume automatic following.
-                constexpr float bottomTolerance{
-                    1.0f
-                };
-
-
-                followLatest_ =
-                    transcriptScrollOffset_
-                    >= transcriptMaxScrollOffset_
-                    - bottomTolerance;
+                transcript_->scrollBy(
+                    -wheelY
+                    * scrollPixelsPerUnit);
             }
 
             break;
@@ -406,16 +504,14 @@ namespace rose::ui
         }
 
 
-        // Perform potentially non-trivial text layout once per UI frame rather
-        // than once for every streamed model chunk.
-        if (transcriptDirty_)
-        {
-            refreshTranscriptText();
-        }
-
         if (inputTextDirty_)
         {
             refreshInputText();
+        }
+
+        if (attachmentTextDirty_)
+        {
+            refreshAttachmentText();
         }
     }
 
@@ -433,21 +529,6 @@ namespace rose::ui
         SDL_RenderClear(
             renderer_.get());
 
-
-        // -------------------------------------------------------------------------
-        // Transcript
-        // -------------------------------------------------------------------------
-        //
-        // SDL_RenderDebugText is TEMPORARY scaffolding.
-        //
-        // SDL documents it as debug-only: fixed tiny bitmap font, ASCII rendering
-        // only, and no automatic wrapping.
-        //
-        // The actual chat renderer will use SDL_ttf.
-        
-        // -------------------------------------------------------------------------
-        // Real SDL_ttf transcript
-        // -------------------------------------------------------------------------
 
         int width{ 0 };
         int height{ 0 };
@@ -467,9 +548,288 @@ namespace rose::ui
         }
 
 
-        // Leave space for the input box at the bottom.
+        // =====================================================================
+        // Composer geometry and layout
+        // =====================================================================
+        //
+        // Calculate the composer first because its height is dynamic. The
+        // transcript then consumes whatever vertical space remains above it.
+        constexpr float windowSideMargin{
+            10.0f
+        };
+
+        constexpr float windowBottomMargin{
+            10.0f
+        };
+
+        constexpr float inputTextLeftPadding{
+            10.0f
+        };
+
+        constexpr float inputTextRightPadding{
+            10.0f
+        };
+
+        constexpr float inputTextTopPadding{
+            7.0f
+        };
+
+        constexpr float inputTextBottomPadding{
+            7.0f
+        };
+
+        constexpr int maximumVisibleInputLines{
+            7
+        };
+
+
+        const int lineHeight =
+            std::max(
+                1,
+                TTF_GetFontLineSkip(
+                    font_.get()));
+
+
+        const float inputAreaWidth =
+            std::max(
+                1.0f,
+                static_cast<float>(width)
+                - windowSideMargin
+                * 2.0f);
+
+
+        const int inputWrapWidth =
+            std::max(
+                1,
+                static_cast<int>(
+                    inputAreaWidth
+                    - inputTextLeftPadding
+                    - inputTextRightPadding));
+
+
+        if (inputWrapWidth != inputWrapWidth_)
+        {
+            if (!TTF_SetTextWrapWidth(
+                inputTextObject_.get(),
+                inputWrapWidth))
+            {
+                throw std::runtime_error{
+                    std::string{
+                        "Could not update Rose input wrapping: "
+                    }
+                    + SDL_GetError()
+                };
+            }
+
+
+            inputWrapWidth_ =
+                inputWrapWidth;
+        }
+
+
+        if (inputWrapWidth != attachmentWrapWidth_)
+        {
+            if (!TTF_SetTextWrapWidth(
+                attachmentTextObject_.get(),
+                inputWrapWidth))
+            {
+                throw std::runtime_error{
+                    std::string{
+                        "Could not update Rose attachment wrapping: "
+                    }
+                    + SDL_GetError()
+                };
+            }
+
+            attachmentWrapWidth_ =
+                inputWrapWidth;
+        }
+
+
+        int attachmentTextWidth{ 0 };
+        int attachmentTextHeight{ 0 };
+
+        if (!TTF_GetTextSize(
+            attachmentTextObject_.get(),
+            &attachmentTextWidth,
+            &attachmentTextHeight))
+        {
+            throw std::runtime_error{
+                std::string{
+                    "Could not measure Rose attachment text: "
+                }
+                + SDL_GetError()
+            };
+        }
+
+
+        int inputTextWidth{ 0 };
+        int inputTextHeight{ 0 };
+
+
+        if (!TTF_GetTextSize(
+            inputTextObject_.get(),
+            &inputTextWidth,
+            &inputTextHeight))
+        {
+            throw std::runtime_error{
+                std::string{
+                    "Could not measure Rose input text: "
+                }
+                + SDL_GetError()
+            };
+        }
+
+
+        // Empty text may report zero height. Keep one visible editing line.
+        const int laidOutInputHeight =
+            std::max(
+                lineHeight,
+                inputTextHeight);
+
+
+        const int maximumVisibleInputTextHeight =
+            lineHeight
+            * maximumVisibleInputLines;
+
+
+        const int visibleInputTextHeight =
+            std::min(
+                laidOutInputHeight,
+                maximumVisibleInputTextHeight);
+
+
+        constexpr int maximumVisibleAttachmentLines{ 2 };
+        constexpr float attachmentGap{ 6.0f };
+
+        const int visibleAttachmentTextHeight =
+            pendingAttachments_.empty()
+                ? 0
+                : std::min(
+                    std::max(
+                        lineHeight,
+                        attachmentTextHeight),
+                    lineHeight
+                        * maximumVisibleAttachmentLines);
+
+        const float attachmentReservedHeight =
+            pendingAttachments_.empty()
+                ? 0.0f
+                : static_cast<float>(
+                    visibleAttachmentTextHeight)
+                    + attachmentGap;
+
+        const float inputAreaHeight =
+            inputTextTopPadding
+            + attachmentReservedHeight
+            + static_cast<float>(
+                visibleInputTextHeight)
+            + inputTextBottomPadding;
+
+
+        const SDL_FRect inputArea{
+            windowSideMargin,
+            static_cast<float>(height)
+                - windowBottomMargin
+                - inputAreaHeight,
+            inputAreaWidth,
+            inputAreaHeight
+        };
+
+
+        const float inputTextX =
+            inputArea.x
+            + inputTextLeftPadding;
+
+
+        const float attachmentTextY =
+            inputArea.y
+            + inputTextTopPadding;
+
+        const float inputViewportTop =
+            inputArea.y
+            + inputTextTopPadding
+            + attachmentReservedHeight;
+
+
+        const float inputViewportHeight =
+            static_cast<float>(
+                visibleInputTextHeight);
+
+
+        // Locate the caret from SDL_ttf's real wrapped layout. TTF substring
+        // offsets are UTF-8 byte offsets, matching inputCursorByteOffset_.
+        TTF_SubString caretSubstring{};
+
+
+        if (!TTF_GetTextSubString(
+            inputTextObject_.get(),
+            static_cast<int>(
+                inputCursorByteOffset_),
+            &caretSubstring))
+        {
+            throw std::runtime_error{
+                std::string{
+                    "Could not locate Rose input caret: "
+                }
+                + SDL_GetError()
+            };
+        }
+
+
+        const float caretContentTop =
+            static_cast<float>(
+                caretSubstring.rect.y);
+
+
+        const float caretContentBottom =
+            caretContentTop
+            + static_cast<float>(
+                lineHeight);
+
+
+        // Once the composer reaches seven lines, scroll only its contents and
+        // keep the caret visible.
+        if (caretContentTop < inputScrollOffsetY_)
+        {
+            inputScrollOffsetY_ =
+                caretContentTop;
+        }
+        else if (
+            caretContentBottom
+            > inputScrollOffsetY_
+            + inputViewportHeight)
+        {
+            inputScrollOffsetY_ =
+                caretContentBottom
+                - inputViewportHeight;
+        }
+
+
+        const float maximumInputScroll =
+            std::max(
+                0.0f,
+                static_cast<float>(
+                    laidOutInputHeight
+                    - visibleInputTextHeight));
+
+
+        inputScrollOffsetY_ =
+            std::clamp(
+                inputScrollOffsetY_,
+                0.0f,
+                maximumInputScroll);
+
+
+        // =====================================================================
+        // Rich transcript layout + rendering
+        // =====================================================================
+        //
+        // RichTranscript owns width-dependent response layouts and scrolling.
+        // Composer geometry remains independent and continues to determine the
+        // vertical viewport available above it.
         constexpr int transcriptLeft{
-    20
+            20
         };
 
         constexpr int transcriptTop{
@@ -480,312 +840,38 @@ namespace rose::ui
             12
         };
 
-        constexpr int inputReservedHeight{
-            66
-        };
-
-
-        constexpr int scrollbarWidth{
-            8
-        };
-
-        constexpr int scrollbarGap{
+        constexpr int transcriptComposerGap{
             10
         };
 
 
-        const int wrapWidth =
+        const int transcriptWidth =
             std::max(
                 1,
                 width
                 - transcriptLeft
-                - transcriptRightPadding
-                - scrollbarGap
-                - scrollbarWidth);
+                - transcriptRightPadding);
 
 
         const int transcriptHeight =
             std::max(
                 1,
-                height
-                - transcriptTop
-                - inputReservedHeight);
+                static_cast<int>(
+                    inputArea.y)
+                - transcriptComposerGap
+                - transcriptTop);
 
 
-        // Wrapping only needs to be recalculated when the usable width changes.
-        if (wrapWidth != transcriptWrapWidth_)
-        {
-            if (!TTF_SetTextWrapWidth(
-                transcriptText_.get(),
-                wrapWidth))
-            {
-                throw std::runtime_error{
-                    std::string{
-                        "Could not update Rose transcript wrapping: "
-                    }
-                    + SDL_GetError()
-                };
-            }
-
-
-            transcriptWrapWidth_ =
-                wrapWidth;
-        }
-
-
-        // Find the fully laid-out height after wrapping.
-        int textWidth{ 0 };
-        int textHeight{ 0 };
-
-
-        if (!TTF_GetTextSize(
-            transcriptText_.get(),
-            &textWidth,
-            &textHeight))
-        {
-            throw std::runtime_error{
-                std::string{
-                    "Could not measure Rose transcript: "
-                }
-                + SDL_GetError()
-            };
-        }
-
-
-        // Prevent old conversation content from drawing through the input field or
-        // outside the transcript viewport.
-        const SDL_Rect transcriptClip{
+        transcript_->render(
             transcriptLeft,
             transcriptTop,
-            wrapWidth,
-            transcriptHeight
-        };
+            transcriptWidth,
+            transcriptHeight);
 
 
-        if (!SDL_SetRenderClipRect(
-            renderer_.get(),
-            &transcriptClip))
-        {
-            throw std::runtime_error{
-                std::string{
-                    "Could not set Rose transcript clip rectangle: "
-                }
-                + SDL_GetError()
-            };
-        }
-
-
-        // Short conversations begin at the top.
-        //
-        // Once the conversation becomes taller than the available viewport, shift it
-        // upward so the newest content remains visible at the bottom.
-        // -------------------------------------------------------------------------
-// Calculate scroll range
-// -------------------------------------------------------------------------
-
-        transcriptMaxScrollOffset_ =
-            std::max(
-                0.0f,
-
-                static_cast<float>(
-                    textHeight
-                    - transcriptHeight));
-
-
-        // Normal chat behavior: while we're following the latest message, remain
-        // pinned to the bottom as streamed content increases the text height.
-        if (followLatest_)
-        {
-            transcriptScrollOffset_ =
-                transcriptMaxScrollOffset_;
-        }
-
-
-        // Window resizing or rewrapping can make the transcript shorter.
-        //
-        // Always guarantee that our existing offset remains valid.
-        transcriptScrollOffset_ =
-            std::clamp(
-                transcriptScrollOffset_,
-                0.0f,
-                transcriptMaxScrollOffset_);
-
-
-        // TTF_DrawRendererText() draws the complete laid-out text object.
-        //
-        // Moving its origin upward gives us a scrolling viewport; the SDL clip rect
-        // prevents content outside the viewport from being visible.
-        const float transcriptY =
-            static_cast<float>(
-                transcriptTop)
-            - transcriptScrollOffset_;
-
-
-        if (!TTF_DrawRendererText(
-            transcriptText_.get(),
-            static_cast<float>(
-                transcriptLeft),
-            transcriptY))
-        {
-            throw std::runtime_error{
-                std::string{
-                    "Could not draw Rose transcript: "
-                }
-                + SDL_GetError()
-            };
-        }
-
-
-        // Do not let the transcript clipping affect the input box that we draw next.
-        if (!SDL_SetRenderClipRect(
-            renderer_.get(),
-            nullptr))
-        {
-            throw std::runtime_error{
-                std::string{
-                    "Could not clear Rose transcript clipping: "
-                }
-                + SDL_GetError()
-            };
-        }
-
-        // -------------------------------------------------------------------------
-        // Transcript scrollbar
-        // -------------------------------------------------------------------------
-        //
-        // Don't show a scrollbar when all content already fits in the viewport.
-        if (transcriptMaxScrollOffset_ > 0.0f)
-        {
-            const float trackX =
-                static_cast<float>(
-                    width
-                    - transcriptRightPadding
-                    - scrollbarWidth);
-
-
-            const SDL_FRect scrollbarTrack{
-                trackX,
-
-                static_cast<float>(
-                    transcriptTop),
-
-                static_cast<float>(
-                    scrollbarWidth),
-
-                static_cast<float>(
-                    transcriptHeight)
-            };
-
-
-            // Subtle background track.
-            SDL_SetRenderDrawColor(
-                renderer_.get(),
-                50,
-                48,
-                58,
-                255);
-
-
-            SDL_RenderFillRect(
-                renderer_.get(),
-                &scrollbarTrack);
-
-
-            // ---------------------------------------------------------------------
-            // Thumb size
-            // ---------------------------------------------------------------------
-            //
-            // The visible fraction of the document determines how large the thumb is.
-            //
-            // Example:
-            //
-            //     viewport = 400px
-            //     content  = 800px
-            //
-            //     visible fraction = 0.5
-            //
-            // so the thumb occupies half the scrollbar track.
-            const float visibleFraction =
-                std::clamp(
-                    static_cast<float>(
-                        transcriptHeight)
-                    / static_cast<float>(
-                        std::max(
-                            textHeight,
-                            1)),
-
-                    0.0f,
-                    1.0f);
-
-
-            constexpr float minimumThumbHeight{
-                28.0f
-            };
-
-
-            const float thumbHeight =
-                std::max(
-                    minimumThumbHeight,
-
-                    scrollbarTrack.h
-                    * visibleFraction);
-
-
-            const float thumbTravel =
-                std::max(
-                    0.0f,
-
-                    scrollbarTrack.h
-                    - thumbHeight);
-
-
-            const float scrollFraction =
-                transcriptMaxScrollOffset_ > 0.0f
-                ? transcriptScrollOffset_
-                / transcriptMaxScrollOffset_
-                : 0.0f;
-
-
-            const SDL_FRect scrollbarThumb{
-                scrollbarTrack.x,
-
-                scrollbarTrack.y
-                    + thumbTravel
-                    * scrollFraction,
-
-                scrollbarTrack.w,
-
-                thumbHeight
-            };
-
-
-            SDL_SetRenderDrawColor(
-                renderer_.get(),
-                135,
-                130,
-                150,
-                255);
-
-
-            SDL_RenderFillRect(
-                renderer_.get(),
-                &scrollbarThumb);
-        }
-
-        SDL_GetWindowSize(
-            window_.get(),
-            &width,
-            &height);
-
-
-        const SDL_FRect inputArea{
-            10.0f,
-            static_cast<float>(height - 46),
-            static_cast<float>(width - 20),
-            36.0f
-        };
-
-
+        // =====================================================================
+        // Composer rendering
+        // =====================================================================
         SDL_SetRenderDrawColor(
             renderer_.get(),
             55,
@@ -799,35 +885,72 @@ namespace rose::ui
             &inputArea);
 
 
-        SDL_SetRenderDrawColor(
+        if (!pendingAttachments_.empty())
+        {
+            const SDL_Rect attachmentClip{
+                static_cast<int>(
+                    inputArea.x
+                    + inputTextLeftPadding),
+                static_cast<int>(attachmentTextY),
+                inputWrapWidth,
+                visibleAttachmentTextHeight
+            };
+
+            if (!SDL_SetRenderClipRect(
+                renderer_.get(),
+                &attachmentClip))
+            {
+                throw std::runtime_error{
+                    std::string{
+                        "Could not set Rose attachment clip rectangle: "
+                    }
+                    + SDL_GetError()
+                };
+            }
+
+            if (!TTF_DrawRendererText(
+                attachmentTextObject_.get(),
+                inputArea.x
+                    + inputTextLeftPadding,
+                attachmentTextY))
+            {
+                throw std::runtime_error{
+                    std::string{
+                        "Could not draw Rose attachment text: "
+                    }
+                    + SDL_GetError()
+                };
+            }
+        }
+
+
+        const SDL_Rect inputClip{
+            static_cast<int>(
+                inputArea.x
+                + inputTextLeftPadding),
+            static_cast<int>(
+                inputViewportTop),
+            inputWrapWidth,
+            visibleInputTextHeight
+        };
+
+
+        if (!SDL_SetRenderClipRect(
             renderer_.get(),
-            245,
-            245,
-            248,
-            255);
-
-        // -------------------------------------------------------------------------
-// Real SDL_ttf input text
-// -------------------------------------------------------------------------
-
-        constexpr float inputTextLeftPadding{
-            10.0f
-        };
-
-
-        constexpr float inputTextTopPadding{
-            7.0f
-        };
-
-
-        const float inputTextX =
-            inputArea.x
-            + inputTextLeftPadding;
+            &inputClip))
+        {
+            throw std::runtime_error{
+                std::string{
+                    "Could not set Rose input clip rectangle: "
+                }
+                + SDL_GetError()
+            };
+        }
 
 
         const float inputTextY =
-            inputArea.y
-            + inputTextTopPadding;
+            inputViewportTop
+            - inputScrollOffsetY_;
 
 
         if (!TTF_DrawRendererText(
@@ -843,39 +966,25 @@ namespace rose::ui
             };
         }
 
-        int inputWidth{ 0 };
-        int inputHeight{ 0 };
-
-
-        if (!TTF_GetTextSize(
-            inputTextObject_.get(),
-            &inputWidth,
-            &inputHeight))
-        {
-            throw std::runtime_error{
-                std::string{
-                    "Could not measure Rose input text: "
-                }
-                + SDL_GetError()
-            };
-        }
-
 
         const float caretX =
             inputTextX
             + static_cast<float>(
-                inputWidth)
-            + 2.0f;
+                caretSubstring.rect.x);
+
+
+        const float caretY =
+            inputTextY
+            + static_cast<float>(
+                caretSubstring.rect.y);
 
 
         const SDL_FRect caret{
             caretX,
-            inputTextY,
+            caretY,
             2.0f,
             static_cast<float>(
-                std::max(
-                    inputHeight,
-                    18))
+                lineHeight)
         };
 
 
@@ -890,6 +999,20 @@ namespace rose::ui
         SDL_RenderFillRect(
             renderer_.get(),
             &caret);
+
+
+        if (!SDL_SetRenderClipRect(
+            renderer_.get(),
+            nullptr))
+        {
+            throw std::runtime_error{
+                std::string{
+                    "Could not clear Rose input clipping: "
+                }
+                + SDL_GetError()
+            };
+        }
+
 
         SDL_RenderPresent(
             renderer_.get());
@@ -930,36 +1053,33 @@ namespace rose::ui
 
     void SdlChatWindow::submitInput()
     {
-        followLatest_ = true;
-
-        transcriptDirty_ = true;
-
-        if (inputText_.empty())
+        if (
+            inputText_.empty()
+            && pendingAttachments_.empty())
         {
             return;
         }
 
-
-        std::string message =
-            std::move(
-                inputText_);
-
+        input::UserSubmission submission{
+            .text = std::move(inputText_),
+            .attachments = std::move(pendingAttachments_)
+        };
 
         inputText_.clear();
+        pendingAttachments_.clear();
+
+        inputCursorByteOffset_ = 0;
+        inputScrollOffsetY_ = 0.0f;
+        resetPreferredCaretX();
 
         inputTextDirty_ = true;
+        attachmentTextDirty_ = true;
 
-        transcript_.push_back(
-            std::string{
-                "You: "
-            }
-        + message);
+        transcript_->appendUserMessage(
+            userTranscriptText(submission));
 
-
-        chatBridge_.submitUserMessage(
-            std::move(message));
-
-        transcriptDirty_ = true;
+        chatBridge_.submitUserSubmission(
+            std::move(submission));
     }
 
 
@@ -969,83 +1089,434 @@ namespace rose::ui
         switch (event.type)
         {
         case ChatEventType::AssistantStarted:
-            streamingAssistantText_ =
-                "Rose: ";
-
+            transcript_->startAssistantResponse();
             break;
 
 
         case ChatEventType::AssistantText:
-            streamingAssistantText_ +=
-                event.text;
-
+            transcript_->appendAssistantText(
+                event.text);
             break;
 
 
         case ChatEventType::AssistantFinished:
-            if (!streamingAssistantText_.empty())
-            {
-                transcript_.push_back(
-                    std::move(
-                        streamingAssistantText_));
-
-                streamingAssistantText_.clear();
-            }
-
+            // AssistantFinished carries RoseCore's authoritative final visible text.
+            // RichTranscript parses only this completed response; streaming chunks
+            // remain literal so partial Markdown/LaTeX cannot corrupt presentation.
+            transcript_->finishAssistantResponse(
+                event.text);
             break;
 
 
         case ChatEventType::ConversationCleared:
-            transcript_.clear();
-
-            streamingAssistantText_.clear();
-
-            transcriptScrollOffset_ =
-                0.0f;
-
-            transcriptMaxScrollOffset_ =
-                0.0f;
-
-            followLatest_ =
-                true;
-
+            transcript_->clear();
             break;
 
 
         case ChatEventType::Error:
-            transcript_.push_back(
-                std::string{
-                    "Error: "
-                }
-            + event.text);
-
-            streamingAssistantText_.clear();
-
+            transcript_->appendError(
+                event.text);
             break;
-
         }
-
-        transcriptDirty_ = true;
     }
 
 
-    void SdlChatWindow::eraseLastUtf8CodePoint()
+    void SdlChatWindow::pasteClipboardIntoComposer()
+    {
+        char* clipboardText =
+            SDL_GetClipboardText();
+
+        if (clipboardText == nullptr)
+        {
+            return;
+        }
+
+        if (*clipboardText != '\0')
+        {
+            insertInputText(
+                clipboardText);
+        }
+
+        SDL_free(
+            clipboardText);
+    }
+
+
+    void SdlChatWindow::copyComposerToClipboard() const
+    {
+        if (inputText_.empty())
+        {
+            // With no draft text, Ctrl+C behaves as a convenient whole-chat copy.
+            copyTranscriptToClipboard();
+            return;
+        }
+
+        SDL_SetClipboardText(
+            inputText_.c_str());
+    }
+
+
+    void SdlChatWindow::cutComposerToClipboard()
     {
         if (inputText_.empty())
         {
             return;
         }
 
+        if (!SDL_SetClipboardText(
+            inputText_.c_str()))
+        {
+            return;
+        }
+
+        inputText_.clear();
+        inputCursorByteOffset_ = 0;
+        inputScrollOffsetY_ = 0.0f;
+        resetPreferredCaretX();
+        inputTextDirty_ = true;
+    }
+
+
+    void SdlChatWindow::copyTranscriptToClipboard() const
+    {
+        const std::string transcriptText =
+            transcript_->copyableText();
+
+        if (transcriptText.empty())
+        {
+            return;
+        }
+
+        SDL_SetClipboardText(
+            transcriptText.c_str());
+    }
+
+
+    void SdlChatWindow::addDroppedFile(
+        const std::string_view pathText)
+    {
+        if (pathText.empty())
+        {
+            return;
+        }
+
+        constexpr std::size_t maximumPendingAttachments{ 16 };
+
+        if (pendingAttachments_.size() >= maximumPendingAttachments)
+        {
+            transcript_->appendError(
+                "Rose currently accepts at most 16 files in one submission.");
+            return;
+        }
+
+        const std::filesystem::path path{
+            std::string{ pathText }
+        };
+
+        const std::filesystem::path normalized =
+            path.lexically_normal();
+
+        const auto duplicate =
+            std::find_if(
+                pendingAttachments_.begin(),
+                pendingAttachments_.end(),
+                [&normalized](const input::FileAttachment& existing)
+                {
+                    return existing.path.lexically_normal()
+                        == normalized;
+                });
+
+        if (duplicate != pendingAttachments_.end())
+        {
+            return;
+        }
+
+        std::string displayName =
+            path.filename().string();
+
+        if (displayName.empty())
+        {
+            displayName = path.string();
+        }
+
+        pendingAttachments_.push_back(
+            input::FileAttachment{
+                .path = path,
+                .displayName = std::move(displayName)
+            });
+
+        attachmentTextDirty_ = true;
+    }
+
+
+    void SdlChatWindow::removeLastPendingAttachment()
+    {
+        if (pendingAttachments_.empty())
+        {
+            return;
+        }
+
+        pendingAttachments_.pop_back();
+        attachmentTextDirty_ = true;
+    }
+
+
+    std::string SdlChatWindow::attachmentSummaryText() const
+    {
+        if (pendingAttachments_.empty())
+        {
+            return {};
+        }
+
+        std::string result{
+            "Attachments: "
+        };
+
+        for (std::size_t index = 0;
+             index < pendingAttachments_.size();
+             ++index)
+        {
+            if (index != 0)
+            {
+                result += "  |  ";
+            }
+
+            result += pendingAttachments_[index].displayName;
+        }
+
+        return result;
+    }
+
+
+    std::string SdlChatWindow::userTranscriptText(
+        const input::UserSubmission& submission) const
+    {
+        std::string result =
+            submission.text.empty()
+                ? std::string{ "[Attached files]" }
+                : submission.text;
+
+        if (!submission.attachments.empty())
+        {
+            result += "\nAttachments: ";
+
+            for (std::size_t index = 0;
+                 index < submission.attachments.size();
+                 ++index)
+            {
+                if (index != 0)
+                {
+                    result += ", ";
+                }
+
+                result += submission.attachments[index].displayName;
+            }
+        }
+
+        return result;
+    }
+
+
+    void SdlChatWindow::insertInputText(
+        const std::string_view text)
+    {
+        if (text.empty())
+        {
+            return;
+        }
+
+
+        inputText_.insert(
+            inputCursorByteOffset_,
+            text.data(),
+            text.size());
+
+
+        inputCursorByteOffset_ +=
+            text.size();
+
+
+        resetPreferredCaretX();
+
+        inputTextDirty_ = true;
+    }
+
+
+    void SdlChatWindow::erasePreviousUtf8CodePoint()
+    {
+        if (inputCursorByteOffset_ == 0)
+        {
+            return;
+        }
+
+
+        const std::size_t previous =
+            previousUtf8Boundary(
+                inputCursorByteOffset_);
+
+
+        inputText_.erase(
+            previous,
+            inputCursorByteOffset_
+                - previous);
+
+
+        inputCursorByteOffset_ =
+            previous;
+
+
+        resetPreferredCaretX();
+
+        inputTextDirty_ = true;
+    }
+
+
+    void SdlChatWindow::eraseNextUtf8CodePoint()
+    {
+        if (
+            inputCursorByteOffset_
+            >= inputText_.size())
+        {
+            return;
+        }
+
+
+        const std::size_t next =
+            nextUtf8Boundary(
+                inputCursorByteOffset_);
+
+
+        inputText_.erase(
+            inputCursorByteOffset_,
+            next
+                - inputCursorByteOffset_);
+
+
+        resetPreferredCaretX();
+
+        inputTextDirty_ = true;
+    }
+
+
+    void SdlChatWindow::moveInputCursorLeft()
+    {
+        inputCursorByteOffset_ =
+            previousUtf8Boundary(
+                inputCursorByteOffset_);
+
+
+        resetPreferredCaretX();
+    }
+
+
+    void SdlChatWindow::moveInputCursorRight()
+    {
+        inputCursorByteOffset_ =
+            nextUtf8Boundary(
+                inputCursorByteOffset_);
+
+
+        resetPreferredCaretX();
+    }
+
+
+    void SdlChatWindow::moveInputCursorVertical(
+        const int direction)
+    {
+        if (direction == 0)
+        {
+            return;
+        }
+
+
+        // Up/Down depends on SDL_ttf's current wrapped layout. If text changed
+        // earlier in this event cycle, synchronize the text object before asking
+        // it for substring geometry.
+        if (inputTextDirty_)
+        {
+            refreshInputText();
+        }
+
+
+        TTF_SubString current{};
+
+
+        if (!TTF_GetTextSubString(
+            inputTextObject_.get(),
+            static_cast<int>(
+                inputCursorByteOffset_),
+            &current))
+        {
+            return;
+        }
+
+
+        if (preferredCaretX_ < 0.0f)
+        {
+            preferredCaretX_ =
+                static_cast<float>(
+                    current.rect.x);
+        }
+
+
+        const int lineHeight =
+            std::max(
+                1,
+                TTF_GetFontLineSkip(
+                    font_.get()));
+
+
+        const int targetY =
+            current.rect.y
+            + direction
+            * lineHeight
+            + lineHeight / 2;
+
+
+        TTF_SubString target{};
+
+
+        if (!TTF_GetTextSubStringForPoint(
+            inputTextObject_.get(),
+            static_cast<int>(
+                preferredCaretX_),
+            targetY,
+            &target))
+        {
+            return;
+        }
+
+
+        inputCursorByteOffset_ =
+            std::clamp(
+                static_cast<std::size_t>(
+                    std::max(
+                        target.offset,
+                        0)),
+                std::size_t{ 0 },
+                inputText_.size());
+    }
+
+
+    std::size_t SdlChatWindow::previousUtf8Boundary(
+        const std::size_t offset) const noexcept
+    {
+        const std::size_t boundedOffset =
+            std::min(
+                offset,
+                inputText_.size());
+
+
+        if (boundedOffset == 0)
+        {
+            return 0;
+        }
+
 
         std::size_t position =
-            inputText_.size() - 1;
+            boundedOffset - 1;
 
 
-        // UTF-8 continuation bytes have the binary form:
-        //
-        //     10xxxxxx
-        //
-        // Walk backward until the leading byte for the final code point.
         while (
             position > 0
             && (
@@ -1058,8 +1529,49 @@ namespace rose::ui
         }
 
 
-        inputText_.erase(
-            position);
+        return position;
+    }
+
+
+    std::size_t SdlChatWindow::nextUtf8Boundary(
+        const std::size_t offset) const noexcept
+    {
+        const std::size_t boundedOffset =
+            std::min(
+                offset,
+                inputText_.size());
+
+
+        if (boundedOffset >= inputText_.size())
+        {
+            return inputText_.size();
+        }
+
+
+        std::size_t position =
+            boundedOffset + 1;
+
+
+        while (
+            position < inputText_.size()
+            && (
+                static_cast<unsigned char>(
+                    inputText_[position])
+                & 0xC0u)
+            == 0x80u)
+        {
+            ++position;
+        }
+
+
+        return position;
+    }
+
+
+    void SdlChatWindow::resetPreferredCaretX() noexcept
+    {
+        preferredCaretX_ =
+            -1.0f;
     }
 
 
@@ -1084,68 +1596,6 @@ namespace rose::ui
         }
     }
 
-    std::string SdlChatWindow::buildTranscriptText() const
-    {
-        std::size_t requiredSize =
-            streamingAssistantText_.size();
-
-
-        for (const std::string& line : transcript_)
-        {
-            requiredSize +=
-                line.size() + 2;
-        }
-
-
-        std::string text;
-
-        text.reserve(
-            requiredSize);
-
-
-        for (const std::string& line : transcript_)
-        {
-            text += line;
-
-            // Give each conversational turn some breathing room.
-            text += "\n\n";
-        }
-
-
-        if (!streamingAssistantText_.empty())
-        {
-            text +=
-                streamingAssistantText_;
-        }
-
-
-        return text;
-    }
-
-
-    void SdlChatWindow::refreshTranscriptText()
-    {
-        const std::string text =
-            buildTranscriptText();
-
-
-        if (!TTF_SetTextString(
-            transcriptText_.get(),
-            text.c_str(),
-            text.size()))
-        {
-            throw std::runtime_error{
-                std::string{
-                    "Could not update Rose transcript text: "
-                }
-                + SDL_GetError()
-            };
-        }
-
-
-        transcriptDirty_ = false;
-    }
-
     void SdlChatWindow::refreshInputText()
     {
         if (!TTF_SetTextString(
@@ -1163,6 +1613,28 @@ namespace rose::ui
 
 
         inputTextDirty_ = false;
+    }
+
+
+    void SdlChatWindow::refreshAttachmentText()
+    {
+        const std::string summary =
+            attachmentSummaryText();
+
+        if (!TTF_SetTextString(
+            attachmentTextObject_.get(),
+            summary.c_str(),
+            summary.size()))
+        {
+            throw std::runtime_error{
+                std::string{
+                    "Could not update Rose attachment text: "
+                }
+                + SDL_GetError()
+            };
+        }
+
+        attachmentTextDirty_ = false;
     }
 
 } // namespace rose::ui
