@@ -4,6 +4,7 @@
 #include "artifacts/Artifact.h"
 
 #include <cstddef>
+#include <cstdint>
 #include <optional>
 #include <string>
 #include <vector>
@@ -26,6 +27,7 @@ namespace rose::tools
 
 namespace rose::agent
 {
+    class AgentJournal;
     class ToolSelectionAgent;
 
     enum class AgentLoopStatus
@@ -41,6 +43,10 @@ namespace rose::agent
     // completing one user request (including a possible /confirm pause).
     struct AgentRunState
     {
+        // Stable id used to correlate all structured AgentJournal events across a
+        // confirmation pause/resume boundary.
+        std::uint64_t runId{ 0 };
+
         std::string originalUserText;
         std::string transientContext;
 
@@ -107,7 +113,8 @@ namespace rose::agent
     //
     // Ownership:
     //   AgentLoop borrows ToolSelectionAgent, ToolRegistry, ToolExecutionPolicy,
-    //   and Logger. All remain worker-thread-owned and must outlive AgentLoop.
+    //   AgentJournal, and Logger. All remain worker-thread-owned and must outlive
+    //   AgentLoop.
     class AgentLoop final
     {
     public:
@@ -115,6 +122,7 @@ namespace rose::agent
             ToolSelectionAgent& selectionAgent,
             tools::ToolRegistry& toolRegistry,
             permissions::ToolExecutionPolicy& executionPolicy,
+            AgentJournal& journal,
             logging::Logger& logger,
             AgentLoopConfig config = {});
 
@@ -137,6 +145,7 @@ namespace rose::agent
         ToolSelectionAgent& selectionAgent_;
         tools::ToolRegistry& toolRegistry_;
         permissions::ToolExecutionPolicy& executionPolicy_;
+        AgentJournal& journal_;
         logging::Logger& logger_;
         AgentLoopConfig config_;
     };

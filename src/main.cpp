@@ -2,6 +2,7 @@
 #include <Windows.h>
 #endif
 
+#include "agent/AgentJournal.h"
 #include "agent/AgentLoop.h"
 #include "agent/ToolConfirmation.h"
 #include "agent/ToolObservation.h"
@@ -24,8 +25,10 @@
 #include "tools/CreateTextFileTool.h"
 #include "tools/GenerateImageTool.h"
 #include "tools/GenerateImageRegisteredTool.h"
-#include "tools/ToolRegistry.h"
+#include "tools/ListDirectoryTool.h"
 #include "tools/ReadFileTool.h"
+#include "tools/ReadTextFileRegisteredTool.h"
+#include "tools/ToolRegistry.h"
 #include "ui/ChatBridge.h"
 #include "ui/SdlChatWindow.h"
 #include "vision/LlamaMtmdVisionProvider.h"
@@ -299,6 +302,20 @@ int main()
                         std::make_unique<
                             rose::tools::CreateTextFileTool>());
 
+                    // Read-only filesystem discovery is intentionally still
+                    // confirmation-gated. list_directory reveals only one level;
+                    // read_text_file reuses the existing exact-file one-shot read
+                    // primitive and returns a context-bounded UTF-8 prefix.
+                    toolRegistry.registerTool(
+                        std::make_unique<
+                            rose::tools::ListDirectoryTool>());
+
+                    toolRegistry.registerTool(
+                        std::make_unique<
+                            rose::tools::ReadTextFileRegisteredTool>(
+                                permissionSystem,
+                                readFileTool));
+
 
                     // ---------------------------------------------------------
                     // First bounded Agent layer
@@ -316,6 +333,21 @@ int main()
 
                     rose::permissions::ToolExecutionPolicy toolExecutionPolicy;
 
+                    // Bounded in-memory black-box journal for Agent decisions,
+                    // permission boundaries, and actual tool execution.
+                    //
+                    // This is independent of Logger mode: /log silent may suppress
+                    // ordinary diagnostics, but the safety/audit journal remains
+                    // available until it is explicitly cleared or overwritten.
+                    rose::agent::AgentJournal agentJournal{
+                        rose::agent::AgentJournalConfig{
+                            .maximumEvents = 256,
+                            .maximumMessageBytes = 512,
+                            .maximumDetailBytes = 2048,
+                            .maximumArgumentValueBytes = 256
+                        }
+                    };
+
                     rose::agent::ToolSelectionAgent toolSelectionAgent{
                         *agentModelProvider,
                         toolRegistry,
@@ -331,6 +363,7 @@ int main()
                         toolSelectionAgent,
                         toolRegistry,
                         toolExecutionPolicy,
+                        agentJournal,
                         logger,
                         rose::agent::AgentLoopConfig{
                             .maximumToolExecutions = 3
@@ -356,6 +389,8 @@ int main()
                         << "/tools, "
                         << "/confirm, "
                         << "/cancel, "
+                        << "/agentlog, "
+                        << "/agentlog clear, "
                         << "/clear, "
                         << "/log silent|normal|verbose, "
                         << "/quit\n\n";
@@ -420,6 +455,63 @@ int main()
 
 
                         // =====================================================
+                        // Structured Agent journal diagnostics
+                        // =====================================================
+                        //
+                        // /agentlog is a developer-facing inspection surface over
+                        // the bounded structured journal. It does not read Logger
+                        // text and it does not persist anything to disk.
+
+                        if (
+                            commandEligible
+                            && submittedText == "/agentlog")
+                        {
+                            chatBridge.postEvent(
+                                rose::ui::ChatEvent{
+                                    .type =
+                                        rose::ui::ChatEventType::
+                                        AssistantStarted
+                                });
+
+                            chatBridge.postEvent(
+                                rose::ui::ChatEvent{
+                                    .type =
+                                        rose::ui::ChatEventType::
+                                        AssistantFinished,
+                                    .text =
+                                        agentJournal.formatRecent(40)
+                                });
+
+                            continue;
+                        }
+
+                        if (
+                            commandEligible
+                            && submittedText == "/agentlog clear")
+                        {
+                            agentJournal.clear();
+
+                            chatBridge.postEvent(
+                                rose::ui::ChatEvent{
+                                    .type =
+                                        rose::ui::ChatEventType::
+                                        AssistantStarted
+                                });
+
+                            chatBridge.postEvent(
+                                rose::ui::ChatEvent{
+                                    .type =
+                                        rose::ui::ChatEventType::
+                                        AssistantFinished,
+                                    .text =
+                                        "Cleared Rose's in-memory Agent journal."
+                                });
+
+                            continue;
+                        }
+
+
+                        // =====================================================
                         // Explicit paused-agent confirmation
                         // =====================================================
                         //
@@ -471,6 +563,28 @@ int main()
                                 const bool partialWorkCompleted =
                                     pendingAgentRun->state.executedToolCount > 0;
 
+                                agentJournal.recordToolRequest(
+                                    pendingAgentRun->state.runId,
+                                    rose::agent::AgentEventType::
+                                        ConfirmationDenied,
+                                    pendingAgentRun->state.executedToolCount + 1,
+                                    pendingAgentRun->confirmation.request,
+                                    "User cancelled the pending tool request.");
+
+                                agentJournal.record(
+                                    rose::agent::AgentEvent{
+                                        .runId =
+                                            pendingAgentRun->state.runId,
+                                        .type =
+                                            rose::agent::AgentEventType::
+                                            RunCompleted,
+                                        .stepIndex = 0,
+                                        .toolId = {},
+                                        .message =
+                                            "Agent run ended because the user cancelled the pending action.",
+                                        .detail = {}
+                                    });
+
                                 pendingAgentRun.reset();
 
                                 chatBridge.postEvent(
@@ -519,6 +633,28 @@ int main()
                             // A paused action is intentionally short-lived. Any
                             // unrelated next message expires it, preventing a stale
                             // /confirm from firing much later.
+                            agentJournal.recordToolRequest(
+                                pendingAgentRun->state.runId,
+                                rose::agent::AgentEventType::
+                                    ConfirmationDenied,
+                                pendingAgentRun->state.executedToolCount + 1,
+                                pendingAgentRun->confirmation.request,
+                                "Pending confirmation expired because the user continued with another message.");
+
+                            agentJournal.record(
+                                rose::agent::AgentEvent{
+                                    .runId =
+                                        pendingAgentRun->state.runId,
+                                    .type =
+                                        rose::agent::AgentEventType::
+                                        RunCompleted,
+                                    .stepIndex = 0,
+                                    .toolId = {},
+                                    .message =
+                                        "Agent run ended because its pending confirmation expired.",
+                                    .detail = {}
+                                });
+
                             pendingAgentRun.reset();
                         }
 

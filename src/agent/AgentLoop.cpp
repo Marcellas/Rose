@@ -1,5 +1,6 @@
 #include "agent/AgentLoop.h"
 
+#include "agent/AgentJournal.h"
 #include "agent/AgentTypes.h"
 #include "agent/ToolObservation.h"
 #include "agent/ToolSelectionAgent.h"
@@ -10,6 +11,8 @@
 #include "tools/ToolTypes.h"
 
 #include <algorithm>
+#include <chrono>
+#include <exception>
 #include <sstream>
 #include <stdexcept>
 #include <string>
@@ -165,11 +168,13 @@ namespace rose::agent
         ToolSelectionAgent& selectionAgent,
         tools::ToolRegistry& toolRegistry,
         permissions::ToolExecutionPolicy& executionPolicy,
+        AgentJournal& journal,
         logging::Logger& logger,
         AgentLoopConfig config)
         : selectionAgent_{ selectionAgent }
         , toolRegistry_{ toolRegistry }
         , executionPolicy_{ executionPolicy }
+        , journal_{ journal }
         , logger_{ logger }
         , config_{ config }
     {
@@ -193,25 +198,105 @@ namespace rose::agent
             };
         }
 
+        const std::uint64_t runId =
+            journal_.beginRun(
+                userText);
+
         AgentRunState state{
+            .runId = runId,
             .originalUserText = std::move(userText),
             .transientContext = std::move(initialTransientContext),
             .executedToolCount = 0,
             .executedRequestFingerprints = {}
         };
 
-        return drive(
-            std::move(state),
-            std::nullopt);
+        try
+        {
+            return drive(
+                std::move(state),
+                std::nullopt);
+        }
+        catch (const std::exception& exception)
+        {
+            journal_.record(
+                AgentEvent{
+                    .runId = runId,
+                    .type = AgentEventType::RunFailed,
+                    .stepIndex = 0,
+                    .toolId = {},
+                    .message = exception.what(),
+                    .detail = {}
+                });
+
+            throw;
+        }
+        catch (...)
+        {
+            journal_.record(
+                AgentEvent{
+                    .runId = runId,
+                    .type = AgentEventType::RunFailed,
+                    .stepIndex = 0,
+                    .toolId = {},
+                    .message = "Agent run failed with an unknown exception.",
+                    .detail = {}
+                });
+
+            throw;
+        }
     }
 
 
     AgentLoopResult AgentLoop::resumeConfirmed(
         PendingAgentRun pending)
     {
-        return drive(
-            std::move(pending.state),
-            std::move(pending.confirmation.request));
+        const std::uint64_t runId =
+            pending.state.runId;
+
+        const std::size_t confirmedStepIndex =
+            pending.state.executedToolCount + 1;
+
+        journal_.recordToolRequest(
+            runId,
+            AgentEventType::ConfirmationGranted,
+            confirmedStepIndex,
+            pending.confirmation.request,
+            "User explicitly confirmed the exact pending request.");
+
+        try
+        {
+            return drive(
+                std::move(pending.state),
+                std::move(pending.confirmation.request));
+        }
+        catch (const std::exception& exception)
+        {
+            journal_.record(
+                AgentEvent{
+                    .runId = runId,
+                    .type = AgentEventType::RunFailed,
+                    .stepIndex = 0,
+                    .toolId = {},
+                    .message = exception.what(),
+                    .detail = {}
+                });
+
+            throw;
+        }
+        catch (...)
+        {
+            journal_.record(
+                AgentEvent{
+                    .runId = runId,
+                    .type = AgentEventType::RunFailed,
+                    .stepIndex = 0,
+                    .toolId = {},
+                    .message = "Agent run failed with an unknown exception.",
+                    .detail = {}
+                });
+
+            throw;
+        }
     }
 
 
@@ -226,6 +311,19 @@ namespace rose::agent
         auto finishReady =
             [&](const bool reachedLimit = false)
             {
+                journal_.record(
+                    AgentEvent{
+                        .runId = state.runId,
+                        .type = AgentEventType::RunCompleted,
+                        .stepIndex = 0,
+                        .toolId = {},
+                        .message =
+                            reachedLimit
+                                ? "Agent run completed at the configured tool execution ceiling."
+                                : "Agent run is ready for final conversational response.",
+                        .detail = {}
+                    });
+
                 result.status =
                     AgentLoopStatus::ReadyForResponse;
 
@@ -249,6 +347,9 @@ namespace rose::agent
                 const permissions::ToolConfirmationState confirmation)
                 -> bool
             {
+                const std::size_t stepIndex =
+                    state.executedToolCount + 1;
+
                 const tools::ITool* tool =
                     toolRegistry_.find(
                         request.toolId);
@@ -270,6 +371,13 @@ namespace rose::agent
                     policyDecision.disposition
                     == permissions::ToolExecutionDisposition::RequiresConfirmation)
                 {
+                    journal_.recordToolRequest(
+                        state.runId,
+                        AgentEventType::ConfirmationRequired,
+                        stepIndex,
+                        request,
+                        policyDecision.reason);
+
                     PendingAgentRun pending{
                         .state = std::move(state),
                         .confirmation =
@@ -295,6 +403,13 @@ namespace rose::agent
 
                 if (!policyDecision.allowed())
                 {
+                    journal_.recordToolRequest(
+                        state.runId,
+                        AgentEventType::PolicyDenied,
+                        stepIndex,
+                        request,
+                        policyDecision.reason);
+
                     throw std::runtime_error{
                         policyDecision.reason
                     };
@@ -311,6 +426,13 @@ namespace rose::agent
                         "Blocked repeated identical tool request: "
                         + request.toolId);
 
+                    journal_.recordToolRequest(
+                        state.runId,
+                        AgentEventType::DuplicateActionBlocked,
+                        stepIndex,
+                        request,
+                        "Blocked an identical tool request that already executed in this run.");
+
                     appendTransientContext(
                         state.transientContext,
                         repeatedRequestGuard(request));
@@ -323,9 +445,73 @@ namespace rose::agent
                     return false;
                 }
 
-                tools::ToolResult toolResult =
-                    toolRegistry_.execute(
-                        request);
+                journal_.recordToolRequest(
+                    state.runId,
+                    AgentEventType::ToolStarted,
+                    stepIndex,
+                    request,
+                    "Tool execution started.");
+
+                const auto startedAt =
+                    std::chrono::steady_clock::now();
+
+                tools::ToolResult toolResult;
+
+                try
+                {
+                    toolResult =
+                        toolRegistry_.execute(
+                            request);
+                }
+                catch (const std::exception& exception)
+                {
+                    const auto duration =
+                        std::chrono::duration_cast<std::chrono::milliseconds>(
+                            std::chrono::steady_clock::now()
+                            - startedAt);
+
+                    journal_.recordToolRequest(
+                        state.runId,
+                        AgentEventType::ToolFailed,
+                        stepIndex,
+                        request,
+                        exception.what(),
+                        duration);
+
+                    throw;
+                }
+                catch (...)
+                {
+                    const auto duration =
+                        std::chrono::duration_cast<std::chrono::milliseconds>(
+                            std::chrono::steady_clock::now()
+                            - startedAt);
+
+                    journal_.recordToolRequest(
+                        state.runId,
+                        AgentEventType::ToolFailed,
+                        stepIndex,
+                        request,
+                        "Tool execution failed with an unknown exception.",
+                        duration);
+
+                    throw;
+                }
+
+                const auto duration =
+                    std::chrono::duration_cast<std::chrono::milliseconds>(
+                        std::chrono::steady_clock::now()
+                        - startedAt);
+
+                journal_.recordToolRequest(
+                    state.runId,
+                    AgentEventType::ToolFinished,
+                    stepIndex,
+                    request,
+                    toolResult.message.empty()
+                        ? "Tool execution completed."
+                        : toolResult.message,
+                    duration);
 
                 appendTransientContext(
                     state.transientContext,
@@ -385,18 +571,48 @@ namespace rose::agent
             state.executedToolCount
             < config_.maximumToolExecutions)
         {
+            const std::size_t nextStepIndex =
+                state.executedToolCount + 1;
+
             const AgentDecision decision =
                 selectionAgent_.decide(
                     state.originalUserText,
                     state.transientContext);
 
-            if (
-                decision.action
-                    == AgentAction::RespondNormally
-                || !decision.toolRequest.has_value())
+            const bool invokesTool =
+                decision.action == AgentAction::InvokeTool
+                && decision.toolRequest.has_value();
+
+            journal_.record(
+                AgentEvent{
+                    .runId = state.runId,
+                    .type = AgentEventType::DecisionMade,
+                    .stepIndex = invokesTool ? nextStepIndex : 0,
+                    .toolId =
+                        invokesTool
+                            ? decision.toolRequest->toolId
+                            : std::string{},
+                    .message =
+                        invokesTool
+                            ? "Control model selected a tool as the next action."
+                            : "Control model selected normal response as the next action.",
+                    .detail =
+                        "control_output_bytes="
+                        + std::to_string(
+                            decision.rawModelOutput.size())
+                });
+
+            if (!invokesTool)
             {
                 return finishReady();
             }
+
+            journal_.recordToolRequest(
+                state.runId,
+                AgentEventType::ToolProposed,
+                nextStepIndex,
+                *decision.toolRequest,
+                "Control model proposed this tool request.");
 
             const bool continued =
                 executeOne(
@@ -416,6 +632,19 @@ namespace rose::agent
             }
         }
 
+
+        journal_.record(
+            AgentEvent{
+                .runId = state.runId,
+                .type = AgentEventType::StepLimitReached,
+                .stepIndex = 0,
+                .toolId = {},
+                .message =
+                    "Stopped before another tool because the configured execution ceiling was reached.",
+                .detail =
+                    "maximum_tool_executions="
+                    + std::to_string(config_.maximumToolExecutions)
+            });
 
         appendTransientContext(
             state.transientContext,
