@@ -13,3 +13,9 @@
 [submodule "external/MicroTex"]
 	path = external/MicroTex
 	url = https://github.com/desktop-app/MicroTex.git
+[submodule "external/stable-diffusion.cpp"]
+	path = external/stable-diffusion.cpp
+	url = https://github.com/leejet/stable-diffusion.cpp.git
+[submodule "external/pdfium"]
+	path = external/pdfium
+	url = https://pdfium.googlesource.com/pdfium.git
