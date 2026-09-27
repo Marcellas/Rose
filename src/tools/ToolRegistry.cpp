@@ -43,6 +43,26 @@ namespace rose::tools
     }
 
 
+    std::unique_ptr<ITool> ToolRegistry::removeTool(
+        const std::string_view toolId) noexcept
+    {
+        const auto found =
+            tools_.find(
+                std::string{ toolId });
+
+        if (found == tools_.end())
+        {
+            return {};
+        }
+
+        std::unique_ptr<ITool> removed =
+            std::move(found->second);
+
+        tools_.erase(found);
+        return removed;
+    }
+
+
     ITool* ToolRegistry::find(
         const std::string_view toolId) noexcept
     {

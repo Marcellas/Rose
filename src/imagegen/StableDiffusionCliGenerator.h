@@ -13,14 +13,35 @@ namespace rose::imagegen
 
     struct StableDiffusionCliConfig
     {
+        // Rose-owned logical model identity. These fields do not affect the
+        // backend command line; they travel with provider diagnostics so every
+        // generated artifact can explain which configured preset produced it.
+        std::string modelId;
+        std::string modelDisplayName;
+
         // Empty means auto-discover sd-cli.exe in Rose's normal development/runtime
         // locations and then PATH.
         std::filesystem::path executablePath;
 
-        // MVP: one normal checkpoint/model file accepted by stable-diffusion.cpp's
-        // --model argument. Newer multi-component models can be added later without
-        // changing IImageGenerator.
+        // Legacy/single-file pipeline loaded through stable-diffusion.cpp's
+        // --model argument (for example SD1.5/SDXL checkpoints).
         std::filesystem::path modelPath;
+
+        // Modern componentized pipeline loaded through:
+        //
+        //     --diffusion-model
+        //     --vae
+        //     --llm
+        //
+        // When diffusionModelPath is non-empty, modelPath must be empty and all
+        // three component paths below are required.
+        std::filesystem::path diffusionModelPath;
+        std::filesystem::path vaePath;
+        std::filesystem::path llmPath;
+
+        // Provider flags used by current transformer-based image models.
+        bool diffusionFlashAttention{ false };
+        bool offloadToCpu{ false };
 
         // Optional stable-diffusion.cpp backend assignments, for example:
         //     cuda0

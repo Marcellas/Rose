@@ -4,10 +4,13 @@
 
 #include "tools/PdfTextExtractor.h"
 
+#include "documents/PdfiumRuntime.h"
 #include "ocr/IOcrEngine.h"
 
+#if defined(ROSE_HAS_PDFIUM)
 #include <fpdf_text.h>
 #include <fpdfview.h>
+#endif
 
 #include <algorithm>
 #include <cmath>
@@ -23,6 +26,8 @@
 
 namespace rose::tools
 {
+
+#if defined(ROSE_HAS_PDFIUM)
 
     namespace
     {
@@ -587,6 +592,8 @@ namespace rose::tools
 
     } // namespace
 
+#endif // ROSE_HAS_PDFIUM
+
 
     PdfTextExtractor::PdfTextExtractor(
         const PdfTextExtractorConfig config)
@@ -620,13 +627,13 @@ namespace rose::tools
             };
         }
 
-        FPDF_InitLibrary();
+        documents::acquirePdfiumRuntime();
     }
 
 
     PdfTextExtractor::~PdfTextExtractor()
     {
-        FPDF_DestroyLibrary();
+        documents::releasePdfiumRuntime();
     }
 
 
@@ -634,6 +641,16 @@ namespace rose::tools
         const ReadBinaryFileResult& file,
         ocr::IOcrEngine& ocrEngine) const
     {
+#if !defined(ROSE_HAS_PDFIUM)
+        (void)file;
+        (void)ocrEngine;
+
+        throw std::runtime_error{
+            "PDF analysis is unavailable in this Rose build because the optional "
+            "PDFium package is not installed. Expected it under external/pdfium. "
+            "Other attachment types remain available."
+        };
+#else
         if (file.bytes.empty())
         {
             throw std::runtime_error{
@@ -831,6 +848,7 @@ namespace rose::tools
         }
 
         return result;
+#endif
     }
 
 } // namespace rose::tools

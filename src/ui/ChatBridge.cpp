@@ -25,44 +25,11 @@ namespace rose::ui
                 return;
             }
 
-            userSubmissions_.push_back(
+            workerRequests_.emplace_back(
                 std::move(submission));
         }
 
         requestAvailable_.notify_one();
-    }
-
-
-    std::optional<input::UserSubmission>
-        ChatBridge::waitForUserSubmission()
-    {
-        std::unique_lock lock{
-            mutex_
-        };
-
-        requestAvailable_.wait(
-            lock,
-            [this]()
-            {
-                return
-                    shutdownRequested_
-                    || !userSubmissions_.empty();
-            });
-
-        if (
-            shutdownRequested_
-            && userSubmissions_.empty())
-        {
-            return std::nullopt;
-        }
-
-        input::UserSubmission submission =
-            std::move(
-                userSubmissions_.front());
-
-        userSubmissions_.pop_front();
-
-        return submission;
     }
 
 
@@ -74,6 +41,60 @@ namespace rose::ui
                 .text = std::move(message),
                 .attachments = {}
             });
+    }
+
+
+    void ChatBridge::submitUiCommand(
+        UiWorkerCommand command)
+    {
+        {
+            std::lock_guard lock{
+                mutex_
+            };
+
+            if (shutdownRequested_)
+            {
+                return;
+            }
+
+            workerRequests_.emplace_back(
+                std::move(command));
+        }
+
+        requestAvailable_.notify_one();
+    }
+
+
+    std::optional<WorkerRequest>
+        ChatBridge::waitForWorkerRequest()
+    {
+        std::unique_lock lock{
+            mutex_
+        };
+
+        requestAvailable_.wait(
+            lock,
+            [this]()
+            {
+                return
+                    shutdownRequested_
+                    || !workerRequests_.empty();
+            });
+
+        if (
+            shutdownRequested_
+            && workerRequests_.empty())
+        {
+            return std::nullopt;
+        }
+
+        WorkerRequest request =
+            std::move(
+                workerRequests_.front());
+
+        workerRequests_.pop_front();
+
+        return request;
     }
 
 
@@ -113,6 +134,52 @@ namespace rose::ui
         events_.pop_front();
 
         return event;
+    }
+
+
+    void ChatBridge::publishWorkspaceSnapshot(
+        workspace::WorkspaceSnapshot snapshot)
+    {
+        std::lock_guard lock{
+            mutex_
+        };
+
+        if (shutdownRequested_)
+        {
+            return;
+        }
+
+        workspaceSnapshot_ = std::move(snapshot);
+        ++workspaceSnapshotVersion_;
+
+        // Keep zero reserved for "no snapshot observed yet" even after an
+        // astronomically unlikely unsigned wraparound.
+        if (workspaceSnapshotVersion_ == 0)
+        {
+            ++workspaceSnapshotVersion_;
+        }
+    }
+
+
+    std::optional<WorkspaceSnapshotUpdate>
+        ChatBridge::workspaceSnapshotSince(
+            const std::uint64_t knownVersion) const
+    {
+        std::lock_guard lock{
+            mutex_
+        };
+
+        if (
+            workspaceSnapshotVersion_ == 0
+            || workspaceSnapshotVersion_ == knownVersion)
+        {
+            return std::nullopt;
+        }
+
+        return WorkspaceSnapshotUpdate{
+            .version = workspaceSnapshotVersion_,
+            .snapshot = workspaceSnapshot_
+        };
     }
 
 

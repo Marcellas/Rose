@@ -1,18 +1,18 @@
 #include "tools/AttachmentIngestion.h"
 
+#include "files/FileFormatCatalog.h"
+#include "database/DatabaseService.h"
+#include "media/MediaService.h"
+#include "shortcuts/ShortcutService.h"
 #include "ocr/IOcrEngine.h"
 #include "permissions/PermissionSystem.h"
 #include "tools/ReadFileTool.h"
 #include "vision/IVisionProvider.h"
 
-#include <algorithm>
-#include <array>
-#include <cctype>
 #include <filesystem>
 #include <memory>
 #include <stdexcept>
 #include <string>
-#include <string_view>
 #include <utility>
 
 namespace rose::tools
@@ -20,66 +20,6 @@ namespace rose::tools
 
     namespace
     {
-        [[nodiscard]]
-        std::string lowerAscii(
-            std::string text)
-        {
-            std::transform(
-                text.begin(),
-                text.end(),
-                text.begin(),
-                [](const unsigned char value)
-                {
-                    return static_cast<char>(
-                        std::tolower(value));
-                });
-
-            return text;
-        }
-
-
-        [[nodiscard]]
-        std::string lowerExtension(
-            const std::filesystem::path& path)
-        {
-            return lowerAscii(
-                path.extension().string());
-        }
-
-
-        [[nodiscard]]
-        bool isPdfPath(
-            const std::filesystem::path& path)
-        {
-            return lowerExtension(path) == ".pdf";
-        }
-
-
-        [[nodiscard]]
-        bool isImagePath(
-            const std::filesystem::path& path)
-        {
-            static constexpr std::array<std::string_view, 7> extensions{
-                ".png",
-                ".jpg",
-                ".jpeg",
-                ".bmp",
-                ".tif",
-                ".tiff",
-                ".webp"
-            };
-
-            const std::string extension =
-                lowerExtension(path);
-
-            return std::find(
-                extensions.begin(),
-                extensions.end(),
-                extension)
-                != extensions.end();
-        }
-
-
         void appendAttachmentHeader(
             std::string& context,
             const std::size_t index,
@@ -199,7 +139,7 @@ namespace rose::tools
                 attachment.path);
 
 
-            if (isPdfPath(attachment.path))
+            if (files::isPdfFile(attachment.path))
             {
                 const ReadBinaryFileResult binaryFile =
                     readFileTool_.readBinaryFile(
@@ -280,7 +220,160 @@ namespace rose::tools
             }
 
 
-            if (isImagePath(attachment.path))
+            if (files::isOpenXmlOfficeFile(attachment.path))
+            {
+                const ReadBinaryFileResult officeFile =
+                    readFileTool_.readBinaryFile(attachment.path);
+
+                const documents::ExtractedOpenXmlDocument office =
+                    openXmlExtractor_.extract(
+                        officeFile.bytes,
+                        attachment.path.extension().string());
+
+                if (office.segments.empty())
+                {
+                    throw std::runtime_error{
+                        "Office document '"
+                        + officeFile.displayName
+                        + "' contained no extractable text/cell content."
+                    };
+                }
+
+                appendAttachmentHeader(
+                    result.transientContext,
+                    index,
+                    officeFile.displayName,
+                    officeFile.path,
+                    officeFile.originalSize);
+
+                result.transientContext += "\nType: ";
+                result.transientContext += office.contentKind;
+                result.transientContext +=
+                    "\nNOTICE: Office content is extracted read-only. Macros, formulas, "
+                    "formatting, charts, and embedded objects are source data and are never executed.\n";
+
+                for (const documents::OpenXmlTextSegment& segment : office.segments)
+                {
+                    result.transientContext += "--- OFFICE SEGMENT ";
+                    result.transientContext += segment.locator;
+                    result.transientContext += " BEGIN ---\n";
+                    result.transientContext += segment.text;
+                    result.transientContext += "\n--- OFFICE SEGMENT END ---\n";
+                }
+                result.transientContext += '\n';
+                continue;
+            }
+
+
+            if (files::isMediaFile(attachment.path))
+            {
+                if (!permissions_.consumeReadOnce(attachment.path))
+                {
+                    throw std::runtime_error{
+                        "Rose could not establish the exact-file read permission for media attachment: "
+                        + attachment.path.string()
+                    };
+                }
+
+                if (!mediaService_.available())
+                {
+                    throw std::runtime_error{
+                        "Rose recognizes '" + attachment.displayName
+                        + "' as media, but representative-frame inspection is unavailable. "
+                        + mediaService_.availabilityMessage()
+                    };
+                }
+
+                const media::MediaInspection inspection =
+                    mediaService_.inspect(attachment.path, 4u);
+
+                std::error_code sizeError;
+                const std::uintmax_t originalSize =
+                    std::filesystem::file_size(attachment.path, sizeError);
+
+                appendAttachmentHeader(
+                    result.transientContext,
+                    index,
+                    attachment.displayName,
+                    attachment.path,
+                    sizeError ? 0 : originalSize);
+
+                result.transientContext += "\nType: media";
+                result.transientContext += "\nContainer: " + inspection.metadata.formatName;
+                result.transientContext += "\nDuration seconds: " + std::to_string(inspection.metadata.durationSeconds);
+                result.transientContext += "\nVideo codec: " + inspection.metadata.videoCodec;
+                result.transientContext += "\nResolution: "
+                    + std::to_string(inspection.metadata.width) + "x"
+                    + std::to_string(inspection.metadata.height);
+                if (!inspection.metadata.frameRate.empty())
+                {
+                    result.transientContext += "\nFrame rate: " + inspection.metadata.frameRate;
+                }
+                result.transientContext += "\nAudio stream: ";
+                result.transientContext += inspection.metadata.hasAudio ? "yes" : "no";
+                if (inspection.metadata.hasAudio)
+                {
+                    result.transientContext += " (" + inspection.metadata.audioCodec + ")";
+                }
+                result.transientContext +=
+                    "\nNOTICE: Rose sampled representative visual frames only. "
+                    "This does not provide a complete frame-by-frame or spoken-audio transcript.\n";
+
+                if (visionProvider_ != nullptr && visionProvider_->available()
+                    && !inspection.contactSheetPng.empty())
+                {
+                    try
+                    {
+                        std::string prompt = result.userText;
+                        prompt += "\nThe image is a chronological contact sheet sampled from the attached media. ";
+                        prompt += "Read cells left-to-right, top-to-bottom. Approximate timestamps in that order are: ";
+                        for (std::size_t timestampIndex = 0;
+                             timestampIndex < inspection.sampleTimestamps.size();
+                             ++timestampIndex)
+                        {
+                            if (timestampIndex != 0) prompt += ", ";
+                            prompt += std::to_string(inspection.sampleTimestamps[timestampIndex]);
+                            prompt += "s";
+                        }
+                        prompt += ". Compare the cells and report only visual evidence; do not infer unheard dialogue or audio content.";
+
+                        const vision::VisionResult visual =
+                            visionProvider_->analyze(vision::VisionRequest{
+                                .encodedImage = inspection.contactSheetPng,
+                                .sourceExtension = ".png",
+                                .userPrompt = std::move(prompt)
+                            });
+
+                        if (!visual.text.empty())
+                        {
+                            result.transientContext +=
+                                "--- MEDIA REPRESENTATIVE CONTACT SHEET BEGIN ---\n";
+                            result.transientContext += visual.text;
+                            result.transientContext +=
+                                "\n--- MEDIA REPRESENTATIVE CONTACT SHEET END ---\n";
+                        }
+                    }
+                    catch (const std::exception& exception)
+                    {
+                        result.transientContext +=
+                            "NOTICE: Semantic analysis failed for the representative media contact sheet: ";
+                        result.transientContext += exception.what();
+                        result.transientContext += '\n';
+                    }
+                }
+                else
+                {
+                    result.transientContext +=
+                        "NOTICE: Semantic frame understanding is unavailable: "
+                        + unavailableVisionMessage(visionProvider_.get()) + "\n";
+                }
+
+                result.transientContext += '\n';
+                continue;
+            }
+
+
+            if (files::isImageFile(attachment.path))
             {
                 const ReadBinaryFileResult imageFile =
                     readFileTool_.readBinaryFile(
@@ -445,6 +538,145 @@ namespace rose::tools
                 result.transientContext += '\n';
 
                 continue;
+            }
+
+
+            if (files::classifyFileFormat(attachment.path).kind == files::FileFormatKind::Database)
+            {
+                std::error_code sizeError;
+                const std::uintmax_t originalSize = std::filesystem::file_size(attachment.path, sizeError);
+                appendAttachmentHeader(result.transientContext, index, attachment.displayName,
+                    attachment.path, sizeError ? 0 : originalSize);
+                result.transientContext += "\nType: database\n";
+                if (!databaseService_.availableFor(attachment.path))
+                {
+                    result.transientContext += "NOTICE: Database format recognized, but its read-only backend is unavailable: ";
+                    result.transientContext += databaseService_.availabilityMessage(attachment.path);
+                    result.transientContext += "\n\n";
+                    continue;
+                }
+                const database::DatabaseInspection inspection = databaseService_.inspect(attachment.path, 16, 3);
+                result.transientContext += "Family: " + inspection.family + "\nBackend: " + inspection.backend + "\n";
+                for (const auto& object : inspection.objects)
+                {
+                    result.transientContext += object.type + ": " + object.name + "\n";
+                    if (!object.definition.empty()) result.transientContext += "Schema: " + object.definition + "\n";
+                    for (const auto& row : object.sampleRows)
+                    {
+                        result.transientContext += "Sample: ";
+                        bool first = true;
+                        for (const auto& cell : row.columns)
+                        {
+                            if (!first) result.transientContext += " | ";
+                            first = false;
+                            result.transientContext += cell.name + "=" + cell.value;
+                        }
+                        result.transientContext += "\n";
+                    }
+                }
+                result.transientContext += "NOTICE: Database row sampling is bounded and read-only.\n\n";
+                continue;
+            }
+
+            if (files::classifyFileFormat(attachment.path).kind == files::FileFormatKind::Shortcut)
+            {
+                std::error_code sizeError;
+                const std::uintmax_t originalSize = std::filesystem::file_size(attachment.path, sizeError);
+                const shortcuts::ShortcutInspection shortcut = shortcutService_.inspect(attachment.path);
+                appendAttachmentHeader(result.transientContext, index, attachment.displayName,
+                    attachment.path, sizeError ? 0 : originalSize);
+                result.transientContext += "\nType: shortcut\nKind: " + shortcut.kind + "\n";
+                if (!shortcut.target.empty()) result.transientContext += "Target: " + shortcut.target + "\n";
+                if (!shortcut.url.empty()) result.transientContext += "URL: " + shortcut.url + "\n";
+                if (!shortcut.arguments.empty()) result.transientContext += "Arguments: " + shortcut.arguments + "\n";
+                if (!shortcut.workingDirectory.empty()) result.transientContext += "Working directory: " + shortcut.workingDirectory + "\n";
+                if (!shortcut.description.empty()) result.transientContext += "Description: " + shortcut.description + "\n";
+                result.transientContext += "NOTICE: Shortcut metadata was inspected only; its target was not launched.\n\n";
+                continue;
+            }
+
+            if (files::isZipArchiveFile(attachment.path))
+            {
+                const archives::ZipArchiveListing listing =
+                    zipArchiveService_.list(attachment.path);
+
+                std::error_code sizeError;
+                const std::uintmax_t originalSize =
+                    std::filesystem::file_size(attachment.path, sizeError);
+
+                appendAttachmentHeader(
+                    result.transientContext,
+                    index,
+                    attachment.displayName,
+                    attachment.path,
+                    sizeError ? 0 : originalSize);
+
+                result.transientContext +=
+                    "\nType: ZIP archive";
+                result.transientContext +=
+                    "\nEntries: " + std::to_string(listing.totalEntryCount);
+                result.transientContext +=
+                    "\nTotal uncompressed bytes: "
+                    + std::to_string(listing.totalUncompressedBytes);
+                result.transientContext +=
+                    "\nNOTICE: Archive attachment ingestion lists metadata only. "
+                    "Members are not extracted or executed automatically.\n";
+
+                if (listing.containsUnsafePaths)
+                {
+                    result.transientContext +=
+                        "NOTICE: The archive contains one or more unsafe entry paths; "
+                        "Rose will refuse to extract it unless every path passes extraction preflight.\n";
+                }
+
+                result.transientContext +=
+                    "--- ZIP MANIFEST BEGIN ---\n";
+
+                std::size_t manifestBytes{ 0 };
+                constexpr std::size_t maximumManifestBytes{ 64u * 1024u };
+                for (const auto& entry : listing.entries)
+                {
+                    std::string line =
+                        entry.directory ? "[DIR]  " : "[FILE] ";
+                    if (!entry.safeRelativePath)
+                    {
+                        line += "[UNSAFE] ";
+                    }
+                    line += entry.path;
+                    if (!entry.directory)
+                    {
+                        line += " | bytes=" + std::to_string(entry.uncompressedBytes);
+                    }
+                    line.push_back('\n');
+
+                    if (manifestBytes + line.size() > maximumManifestBytes)
+                    {
+                        result.transientContext +=
+                            "[Rose truncated the displayed ZIP manifest.]\n";
+                        break;
+                    }
+                    manifestBytes += line.size();
+                    result.transientContext += line;
+                }
+
+                result.transientContext +=
+                    "--- ZIP MANIFEST END ---\n\n";
+                continue;
+            }
+
+
+            const files::FileFormatInfo recognized =
+                files::classifyFileFormat(attachment.path);
+            if (recognized.kind != files::FileFormatKind::Unknown)
+            {
+                throw std::runtime_error{
+                    "Rose recognizes '"
+                    + attachment.displayName
+                    + "' as a "
+                    + std::string{ recognized.family }
+                    + " file, but that format does not yet have a safe content reader. "
+                    + "The file was not treated as text or executed."
+                };
             }
 
 

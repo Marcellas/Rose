@@ -7,16 +7,16 @@
 #include <cstdint>
 #include <string>
 #include <string_view>
+#include <unordered_map>
 #include <vector>
 
 namespace rose::agent
 {
-
-    // Structured events emitted by Rose's bounded Agent execution path.
+    // Structured events emitted by Rose's bounded Agent and local execution paths.
     //
-    // These are intentionally higher-level than the ordinary Logger stream. They
-    // describe agent decisions, permission boundaries, and real tool execution so
-    // Rose can later explain what happened without scraping human-readable logs.
+    // AgentJournal began as an AgentLoop-only diagnostic surface. Batch 26 widens
+    // the event vocabulary slightly so non-model local operations can use the same
+    // bounded black-box trail without inventing another logging subsystem.
     enum class AgentEventType
     {
         RunStarted,
@@ -32,7 +32,17 @@ namespace rose::agent
         DuplicateActionBlocked,
         StepLimitReached,
         RunCompleted,
-        RunFailed
+        RunFailed,
+        OperationStarted,
+        OperationFinished,
+        OperationFailed
+    };
+
+
+    struct AgentRunProvenance
+    {
+        std::string projectId;
+        std::string discussionId;
     };
 
 
@@ -51,8 +61,13 @@ namespace rose::agent
         // one concrete tool step.
         std::size_t stepIndex{ 0 };
 
-        // Empty for events that are not associated with a tool.
+        // Empty for events that are not associated with a tool/capability.
         std::string toolId;
+
+        // Provider-neutral workspace provenance. These ids are intentionally copied
+        // as strings so the journal does not own WorkspaceRepository state.
+        std::string projectId;
+        std::string discussionId;
 
         // Short human-readable explanation. Kept bounded by AgentJournal.
         std::string message;
@@ -82,24 +97,41 @@ namespace rose::agent
     };
 
 
-    // AgentJournal is a worker-thread-owned bounded black-box journal.
+    // Optional durable store. AgentJournal treats persistence as best-effort: a
+    // disk error must never make a safe tool action fail after policy approval.
+    // Persistence health is surfaced through /agentlog instead.
+    class IAgentJournalStore
+    {
+    public:
+        virtual ~IAgentJournalStore() = default;
+
+        [[nodiscard]]
+        virtual std::vector<AgentEvent> load() = 0;
+
+        virtual void save(
+            const std::vector<AgentEvent>& events) = 0;
+    };
+
+
+    // Worker-thread-owned bounded black-box journal.
     //
     // OWNERSHIP / LIFETIME
     // --------------------
-    // main() owns one AgentJournal for the conversation worker. AgentLoop borrows
-    // it. The journal owns only small value events and never owns tools, model
-    // providers, artifacts, or OS resources.
+    // main() owns one AgentJournal for the conversation worker. AgentLoop and the
+    // shared ToolExecutionService borrow it. The optional IAgentJournalStore is
+    // also borrowed and must outlive the journal.
     //
     // PERSISTENCE
     // -----------
-    // Nothing is written to disk in this checkpoint. This is deliberate: first we
-    // prove the event model and bounded-memory behavior. A later crash-journal layer
-    // can serialize a snapshot explicitly.
+    // When a store is supplied, the bounded snapshot is restored on launch and
+    // rewritten after each event. Failures are retained as diagnostics instead of
+    // aborting tool execution.
     class AgentJournal final
     {
     public:
         explicit AgentJournal(
-            AgentJournalConfig config = {});
+            AgentJournalConfig config = {},
+            IAgentJournalStore* store = nullptr);
 
         AgentJournal(const AgentJournal&) = delete;
         AgentJournal& operator=(const AgentJournal&) = delete;
@@ -110,7 +142,8 @@ namespace rose::agent
         // Allocates a monotonically increasing run id and records RunStarted.
         [[nodiscard]]
         std::uint64_t beginRun(
-            std::string_view userRequest);
+            std::string_view userRequest,
+            AgentRunProvenance provenance = {});
 
         void record(
             AgentEvent event);
@@ -141,6 +174,9 @@ namespace rose::agent
         [[nodiscard]]
         std::size_t capacity() const noexcept;
 
+        [[nodiscard]]
+        const std::string& persistenceError() const noexcept;
+
     private:
         [[nodiscard]]
         std::string boundText(
@@ -151,7 +187,11 @@ namespace rose::agent
         std::string formatToolRequest(
             const tools::ToolRequest& request) const;
 
+        void restoreBestEffort() noexcept;
+        void persistBestEffort() noexcept;
+
         AgentJournalConfig config_;
+        IAgentJournalStore* store_{ nullptr };
 
         // Ring storage. We reserve the configured capacity once and reuse it.
         std::vector<AgentEvent> events_;
@@ -159,6 +199,11 @@ namespace rose::agent
 
         std::uint64_t nextSequence_{ 1 };
         std::uint64_t nextRunId_{ 1 };
+
+        // Active provenance exists only for currently-running/pending Agent runs.
+        // Completed/failed runs are removed to keep this map bounded.
+        std::unordered_map<std::uint64_t, AgentRunProvenance> runProvenance_;
+        std::string persistenceError_;
     };
 
 

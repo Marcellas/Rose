@@ -335,6 +335,98 @@ namespace rose::imagegen
         }
 
 
+        [[nodiscard]]
+        bool usesComponentizedModel(
+            const StableDiffusionCliConfig& config) noexcept
+        {
+            return
+                !config.diffusionModelPath.empty()
+                || !config.vaePath.empty()
+                || !config.llmPath.empty();
+        }
+
+
+        [[nodiscard]]
+        std::string validateModelConfiguration(
+            const StableDiffusionCliConfig& config)
+        {
+            const bool componentized =
+                usesComponentizedModel(
+                    config);
+
+            if (
+                componentized
+                && !config.modelPath.empty())
+            {
+                return
+                    "Image generator configuration cannot use both --model and "
+                    "--diffusion-model component paths at the same time.";
+            }
+
+            if (!componentized)
+            {
+                if (config.modelPath.empty())
+                {
+                    return "No image-generation model is configured.";
+                }
+
+                if (!std::filesystem::exists(
+                        config.modelPath))
+                {
+                    return
+                        "Image-generation model not found: "
+                        + config.modelPath.string();
+                }
+
+                return {};
+            }
+
+            if (config.diffusionModelPath.empty())
+            {
+                return
+                    "Componentized image generation requires a diffusion model.";
+            }
+
+            if (config.vaePath.empty())
+            {
+                return
+                    "Componentized image generation requires a VAE model.";
+            }
+
+            if (config.llmPath.empty())
+            {
+                return
+                    "Componentized image generation requires an LLM/text encoder.";
+            }
+
+            if (!std::filesystem::exists(
+                    config.diffusionModelPath))
+            {
+                return
+                    "Diffusion model not found: "
+                    + config.diffusionModelPath.string();
+            }
+
+            if (!std::filesystem::exists(
+                    config.vaePath))
+            {
+                return
+                    "Image VAE not found: "
+                    + config.vaePath.string();
+            }
+
+            if (!std::filesystem::exists(
+                    config.llmPath))
+            {
+                return
+                    "Image text encoder not found: "
+                    + config.llmPath.string();
+            }
+
+            return {};
+        }
+
+
         void validateRequest(
             const ImageGenerationRequest& request)
         {
@@ -405,9 +497,8 @@ namespace rose::imagegen
                 return
                     !executable.empty()
                     && std::filesystem::exists(executable)
-                    && !config_.modelPath.empty()
-                    && std::filesystem::exists(
-                        config_.modelPath);
+                    && validateModelConfiguration(
+                        config_).empty();
 #else
                 return false;
 #endif
@@ -439,16 +530,13 @@ namespace rose::imagegen
                     + executable.string();
             }
 
-            if (config_.modelPath.empty())
-            {
-                return "No image-generation model is configured.";
-            }
+            const std::string modelConfigurationError =
+                validateModelConfiguration(
+                    config_);
 
-            if (!std::filesystem::exists(
-                    config_.modelPath))
+            if (!modelConfigurationError.empty())
             {
-                return "Image-generation model not found: "
-                    + config_.modelPath.string();
+                return modelConfigurationError;
             }
 
             return "Local stable-diffusion.cpp image generation is available.";
@@ -479,9 +567,33 @@ namespace rose::imagegen
                 std::filesystem::absolute(
                     resolveExecutable(config_));
 
+            const bool componentized =
+                usesComponentizedModel(
+                    config_);
+
             const std::filesystem::path modelPath =
-                std::filesystem::absolute(
-                    config_.modelPath);
+                config_.modelPath.empty()
+                    ? std::filesystem::path{}
+                    : std::filesystem::absolute(
+                        config_.modelPath);
+
+            const std::filesystem::path diffusionModelPath =
+                config_.diffusionModelPath.empty()
+                    ? std::filesystem::path{}
+                    : std::filesystem::absolute(
+                        config_.diffusionModelPath);
+
+            const std::filesystem::path vaePath =
+                config_.vaePath.empty()
+                    ? std::filesystem::path{}
+                    : std::filesystem::absolute(
+                        config_.vaePath);
+
+            const std::filesystem::path llmPath =
+                config_.llmPath.empty()
+                    ? std::filesystem::path{}
+                    : std::filesystem::absolute(
+                        config_.llmPath);
 
             const std::filesystem::path outputPath =
                 std::filesystem::absolute(
@@ -490,20 +602,13 @@ namespace rose::imagegen
             std::filesystem::create_directories(
                 outputPath.parent_path());
 
-            const std::filesystem::path logDirectory =
-                std::filesystem::temp_directory_path()
-                / "Rose"
-                / "imagegen";
-
-            std::filesystem::create_directories(
-                logDirectory);
-
+            // Keep the backend process log beside the intended image from the
+            // moment the child process starts. A failed generation therefore still
+            // leaves useful local evidence, while successful generations retain a
+            // directly associated diagnostic sidecar.
             const std::filesystem::path logPath =
-                logDirectory
-                / ("sd-cli-"
-                   + std::to_string(
-                       GetCurrentProcessId())
-                   + ".log");
+                outputPath.string()
+                + ".sdcli.log.txt";
 
             SECURITY_ATTRIBUTES security{};
             security.nLength = sizeof(security);
@@ -549,8 +654,26 @@ namespace rose::imagegen
             appendArgument(
                 executable.wstring());
 
-            appendArgument(L"--model");
-            appendArgument(modelPath.wstring());
+            if (componentized)
+            {
+                appendArgument(L"--diffusion-model");
+                appendArgument(
+                    diffusionModelPath.wstring());
+
+                appendArgument(L"--vae");
+                appendArgument(
+                    vaePath.wstring());
+
+                appendArgument(L"--llm");
+                appendArgument(
+                    llmPath.wstring());
+            }
+            else
+            {
+                appendArgument(L"--model");
+                appendArgument(
+                    modelPath.wstring());
+            }
 
             appendArgument(L"--prompt");
             appendArgument(
@@ -622,6 +745,18 @@ namespace rose::imagegen
                 config_.autoFit
                     ? L"on"
                     : L"off");
+
+            if (config_.diffusionFlashAttention)
+            {
+                appendArgument(
+                    L"--diffusion-fa");
+            }
+
+            if (config_.offloadToCpu)
+            {
+                appendArgument(
+                    L"--offload-to-cpu");
+            }
 
             appendArgument(L"--output");
             appendArgument(outputPath.wstring());
@@ -718,7 +853,9 @@ namespace rose::imagegen
                 logHandle.reset();
 
                 throw std::runtime_error{
-                    "Local image generation timed out.\n"
+                    "Local image generation timed out.\nDiagnostic log: "
+                    + logPath.string()
+                    + "\n"
                     + readTextFile(logPath)
                 };
             }
@@ -749,17 +886,14 @@ namespace rose::imagegen
             const std::string processLog =
                 readTextFile(logPath);
 
-            std::error_code removeError;
-            std::filesystem::remove(
-                logPath,
-                removeError);
-
             if (exitCode != 0)
             {
                 throw std::runtime_error{
                     "stable-diffusion.cpp failed with exit code "
                     + std::to_string(exitCode)
-                    + ".\n"
+                    + ".\nDiagnostic log: "
+                    + logPath.string()
+                    + "\n"
                     + processLog
                 };
             }
@@ -770,16 +904,105 @@ namespace rose::imagegen
                 || std::filesystem::file_size(outputPath) == 0)
             {
                 throw std::runtime_error{
-                    "stable-diffusion.cpp completed without producing the expected image.\n"
+                    "stable-diffusion.cpp completed without producing the expected image.\nDiagnostic log: "
+                    + logPath.string()
+                    + "\n"
                     + processLog
                 };
             }
 
-            return ImageGenerationResult{
+            ImageGenerationResult result{
                 .outputPath = outputPath,
                 .providerName = "stable-diffusion.cpp",
-                .seed = request.seed
+                .seed = request.seed,
+                .diagnosticLogPath = logPath
             };
+
+            const auto addProvenance =
+                [&result](
+                    std::string key,
+                    std::string value)
+                {
+                    if (!value.empty())
+                    {
+                        result.provenance.push_back(
+                            ImageGenerationProvenanceEntry{
+                                .key = std::move(key),
+                                .value = std::move(value)
+                            });
+                    }
+                };
+
+            addProvenance(
+                "model_id",
+                config_.modelId);
+            addProvenance(
+                "model_display_name",
+                config_.modelDisplayName);
+            addProvenance(
+                "backend_executable",
+                executable.string());
+            addProvenance(
+                "model_topology",
+                componentized
+                    ? "componentized"
+                    : "single-checkpoint");
+
+            if (componentized)
+            {
+                addProvenance(
+                    "diffusion_model_path",
+                    diffusionModelPath.string());
+                addProvenance(
+                    "vae_path",
+                    vaePath.string());
+                addProvenance(
+                    "text_encoder_path",
+                    llmPath.string());
+            }
+            else
+            {
+                addProvenance(
+                    "model_path",
+                    modelPath.string());
+            }
+
+            addProvenance(
+                "backend_assignment",
+                config_.backendAssignment);
+            addProvenance(
+                "params_backend_assignment",
+                config_.paramsBackendAssignment);
+            addProvenance(
+                "max_vram_assignment",
+                config_.maxVramAssignment);
+            addProvenance(
+                "auto_fit",
+                config_.autoFit
+                    ? "true"
+                    : "false");
+            addProvenance(
+                "diffusion_flash_attention",
+                config_.diffusionFlashAttention
+                    ? "true"
+                    : "false");
+            addProvenance(
+                "offload_to_cpu",
+                config_.offloadToCpu
+                    ? "true"
+                    : "false");
+
+            for (std::size_t index = 0;
+                 index < config_.extraArguments.size();
+                 ++index)
+            {
+                addProvenance(
+                    "extra_argument_"
+                        + std::to_string(index),
+                    config_.extraArguments[index]);
+            }
+
+            return result;
 #endif
         }
 

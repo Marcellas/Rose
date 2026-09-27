@@ -1,6 +1,11 @@
 #pragma once
 
+#include "archives/ZipArchiveService.h"
+#include "documents/OpenXmlDocumentExtractor.h"
+#include "database/DatabaseService.h"
 #include "input/UserSubmission.h"
+#include "media/MediaService.h"
+#include "shortcuts/ShortcutService.h"
 #include "tools/PdfTextExtractor.h"
 
 #include <memory>
@@ -41,9 +46,15 @@ namespace rose::tools
     //
     // Dispatch today:
     //
-    //     .pdf                         -> PDFium + OCR fallback
-    //     png/jpg/jpeg/bmp/tif/tiff   -> semantic vision + OCR
-    //     everything else             -> UTF-8/source reader
+    //     .pdf                                  -> PDFium + OCR fallback
+    //     docx/docm/xlsx/xlsm/pptx/pptm         -> structured Open XML extraction
+    //     png/jpg/jpeg/bmp/tif/tiff/webp        -> semantic vision + OCR
+    //     webm/mp4/mov/mkv/avi/wmv/mpeg/gif     -> local media metadata + representative-frame vision
+    //     .zip                                    -> bounded archive manifest
+    //     sqlite/mdb/accdb                        -> bounded read-only database schema/sample
+    //     .lnk/.url                                -> shortcut target metadata only
+    //     known-but-not-yet-readable binary      -> explicit capability notice
+    //     everything else                        -> UTF-8/source reader
     //
     // OCR and semantic vision are deliberately separate capabilities. The OCR
     // provider answers "what text is visible?" while the vision provider answers
@@ -79,6 +90,11 @@ namespace rose::tools
         std::unique_ptr<ocr::IOcrEngine> ocrEngine_;
         std::unique_ptr<vision::IVisionProvider> visionProvider_;
         PdfTextExtractor pdfTextExtractor_;
+        documents::OpenXmlDocumentExtractor openXmlExtractor_;
+        archives::WindowsZipArchiveService zipArchiveService_;
+        media::LocalMediaService mediaService_;
+        database::LocalDatabaseService databaseService_;
+        shortcuts::LocalShortcutService shortcutService_;
     };
 
 } // namespace rose::tools

@@ -1,5 +1,7 @@
 #include "artifacts/ArtifactStore.h"
+#include "imagegen/ImageGenerationProfiles.h"
 #include "imagegen/StableDiffusionCliGenerator.h"
+#include "policy/ContentPolicy.h"
 #include "tools/GenerateImageTool.h"
 
 #include <filesystem>
@@ -36,20 +38,33 @@ int main(
             "data/artifacts/sandbox"
         };
 
-        rose::tools::GenerateImageTool tool{
-            generator,
-            store
+        rose::policy::ContentPolicy contentPolicy{
+            rose::policy::ContentPolicyConfig{
+                .mode =
+                    rose::policy::ContentMode::
+                        DevelopmentUnrestricted
+            }
         };
 
-        rose::imagegen::ImageGenerationRequest request;
-        request.prompt = argv[2];
-        request.width = 512;
-        request.height = 512;
-        request.steps = 20;
-        request.cfgScale = 7.0f;
+        rose::tools::GenerateImageTool tool{
+            generator,
+            store,
+            contentPolicy,
+            rose::imagegen::makeStableDiffusion15Profiles()
+        };
 
-        const rose::artifacts::Artifact artifact =
-            tool.generate(request);
+        rose::imagegen::ImageGenerationIntent intent;
+        intent.prompt = argv[2];
+        intent.quality =
+            rose::imagegen::ImageGenerationQuality::Standard;
+        intent.aspectRatio =
+            rose::imagegen::ImageAspectRatio::Auto;
+
+        const rose::tools::GeneratedImageOutcome generated =
+            tool.generate(intent);
+
+        const rose::artifacts::Artifact& artifact =
+            generated.artifact;
 
         std::cout
             << "Generated artifact:\n"

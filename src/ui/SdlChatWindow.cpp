@@ -288,6 +288,59 @@ namespace rose::ui
             createContextMenuLabel(
                 "Copy Message");
 
+
+        // -------------------------------------------------------------------------
+        // Pending attachment presentation
+        // -------------------------------------------------------------------------
+        attachmentSummaryText_.reset(
+            TTF_CreateText(
+                textEngine_.get(),
+                font_.get(),
+                "",
+                0));
+
+        if (!attachmentSummaryText_)
+        {
+            throw std::runtime_error{
+                std::string{
+                    "Could not create Rose attachment-summary text: "
+                }
+                + SDL_GetError()
+            };
+        }
+
+        if (!TTF_SetTextColor(
+            attachmentSummaryText_.get(),
+            184,
+            196,
+            214,
+            255))
+        {
+            throw std::runtime_error{
+                std::string{
+                    "Could not set Rose attachment-summary color: "
+                }
+                + SDL_GetError()
+            };
+        }
+
+
+        // Artifact cards are deliberately separate from the selectable text
+        // transcript. That restores previews/open/reveal behavior without
+        // discarding the newer transcript selection/copy features.
+        artifactCards_ =
+            std::make_unique<ArtifactCardStack>(
+                *renderer_,
+                *textEngine_,
+                *font_);
+
+
+        // SDL3 owns drop-event memory. SdlChatWindow copies event.drop.data into
+        // std::filesystem::path immediately and never frees SDL's pointer.
+        SDL_SetEventEnabled(
+            SDL_EVENT_DROP_FILE,
+            true);
+
         // -------------------------------------------------------------------------
         // Text input
         // -------------------------------------------------------------------------
@@ -315,6 +368,276 @@ namespace rose::ui
     }
 
 
+    void SdlChatWindow::addDroppedFile(
+        const char* utf8Path)
+    {
+        if (
+            utf8Path == nullptr
+            || *utf8Path == '\0')
+        {
+            return;
+        }
+
+        constexpr std::size_t maximumPendingAttachments{
+            16
+        };
+
+        if (
+            pendingAttachments_.size()
+            >= maximumPendingAttachments)
+        {
+            transcript_.push_back(
+                "Error: Rose can stage at most 16 dropped files in one submission.");
+
+            transcriptDirty_ =
+                true;
+
+            return;
+        }
+
+
+        // SDL3 drop paths are UTF-8. std::filesystem::path on Windows accepts a
+        // std::u8string without routing the bytes through the active ANSI codepage.
+        const std::string sourceUtf8{
+            utf8Path
+        };
+
+        std::u8string sourceU8;
+        sourceU8.reserve(
+            sourceUtf8.size());
+
+        for (const unsigned char byte : sourceUtf8)
+        {
+            sourceU8.push_back(
+                static_cast<char8_t>(
+                    byte));
+        }
+
+        std::filesystem::path droppedPath{
+            sourceU8
+        };
+
+
+        std::error_code error;
+
+        droppedPath =
+            std::filesystem::absolute(
+                droppedPath,
+                error);
+
+        if (error)
+        {
+            transcript_.push_back(
+                std::string{
+                    "Error: Could not resolve dropped path: "
+                }
+                + sourceUtf8);
+
+            transcriptDirty_ =
+                true;
+
+            return;
+        }
+
+
+        const std::filesystem::path canonical =
+            std::filesystem::weakly_canonical(
+                droppedPath,
+                error);
+
+        if (!error)
+        {
+            droppedPath =
+                canonical;
+        }
+        else
+        {
+            error.clear();
+
+            droppedPath =
+                droppedPath.lexically_normal();
+        }
+
+
+        if (!std::filesystem::is_regular_file(
+            droppedPath,
+            error))
+        {
+            std::string message{
+                "Error: Dropped path is not a readable regular file: "
+            };
+
+            message +=
+                droppedPath.string();
+
+            if (std::filesystem::is_directory(
+                droppedPath,
+                error))
+            {
+                message +=
+                    " (directory drag/drop will be handled by Rose's scoped-directory workflow rather than file attachments).";
+            }
+
+            transcript_.push_back(
+                std::move(message));
+
+            transcriptDirty_ =
+                true;
+
+            return;
+        }
+
+
+        for (const input::FileAttachment& existing : pendingAttachments_)
+        {
+            error.clear();
+
+            if (
+                existing.path == droppedPath
+                || std::filesystem::equivalent(
+                    existing.path,
+                    droppedPath,
+                    error))
+            {
+                return;
+            }
+        }
+
+
+        const std::u8string displayNameU8 =
+            droppedPath.filename().u8string();
+
+        const std::string displayName{
+            reinterpret_cast<const char*>(
+                displayNameU8.data()),
+            displayNameU8.size()
+        };
+
+
+        pendingAttachments_.push_back(
+            input::FileAttachment{
+                .path =
+                    std::move(droppedPath),
+                .displayName =
+                    displayName.empty()
+                        ? sourceUtf8
+                        : displayName
+            });
+
+
+        refreshAttachmentSummaryText();
+    }
+
+
+    bool SdlChatWindow::removeDroppedFile(
+        const std::filesystem::path& path)
+    {
+        const auto found = std::find_if(
+            pendingAttachments_.begin(),
+            pendingAttachments_.end(),
+            [&](const input::FileAttachment& attachment)
+            {
+                std::error_code error;
+                return attachment.path == path
+                    || std::filesystem::equivalent(
+                        attachment.path,
+                        path,
+                        error);
+            });
+
+        if (found == pendingAttachments_.end())
+        {
+            return false;
+        }
+
+        pendingAttachments_.erase(found);
+        refreshAttachmentSummaryText();
+        return true;
+    }
+
+
+    void SdlChatWindow::clearPendingAttachments()
+    {
+        pendingAttachments_.clear();
+        refreshAttachmentSummaryText();
+    }
+
+
+    std::string SdlChatWindow::pendingAttachmentSummary() const
+    {
+        if (pendingAttachments_.empty())
+        {
+            return {};
+        }
+
+        std::string summary{
+            "Attached: "
+        };
+
+        constexpr std::size_t maximumVisibleNames{
+            4
+        };
+
+        const std::size_t visibleCount =
+            (std::min)(
+                pendingAttachments_.size(),
+                maximumVisibleNames);
+
+        for (std::size_t index = 0;
+            index < visibleCount;
+            ++index)
+        {
+            if (index > 0)
+            {
+                summary +=
+                    ", ";
+            }
+
+            summary +=
+                pendingAttachments_[index].displayName;
+        }
+
+        if (pendingAttachments_.size() > visibleCount)
+        {
+            summary +=
+                " +";
+
+            summary +=
+                std::to_string(
+                    pendingAttachments_.size()
+                    - visibleCount);
+
+            summary +=
+                " more";
+        }
+
+        summary +=
+            "  (Enter to send)";
+
+        return summary;
+    }
+
+
+    void SdlChatWindow::refreshAttachmentSummaryText()
+    {
+        const std::string summary =
+            pendingAttachmentSummary();
+
+        if (!TTF_SetTextString(
+            attachmentSummaryText_.get(),
+            summary.c_str(),
+            summary.size()))
+        {
+            throw std::runtime_error{
+                std::string{
+                    "Could not update Rose attachment-summary text: "
+                }
+                + SDL_GetError()
+            };
+        }
+    }
+
+
     bool SdlChatWindow::handleEvent(
         const SDL_Event& event)
     {
@@ -329,6 +652,20 @@ namespace rose::ui
             if (event.window.windowID == windowId)
             {
                 return false;
+            }
+
+            break;
+
+
+        case SDL_EVENT_DROP_FILE:
+            if (
+                event.drop.windowID == windowId
+                && event.drop.data != nullptr)
+            {
+                // SDL owns event.drop.data in SDL3. Copy it immediately into
+                // UI-owned attachment state; do not SDL_free() this pointer.
+                addDroppedFile(
+                    event.drop.data);
             }
 
             break;
@@ -495,7 +832,19 @@ namespace rose::ui
 
 
                 case SDLK_BACKSPACE:
-                    erasePreviousUtf8CodePoint();
+                    if (
+                        inputText_.empty()
+                        && !hasInputSelection()
+                        && !pendingAttachments_.empty())
+                    {
+                        pendingAttachments_.pop_back();
+                        refreshAttachmentSummaryText();
+                    }
+                    else
+                    {
+                        erasePreviousUtf8CodePoint();
+                    }
+
                     break;
 
 
@@ -559,6 +908,22 @@ namespace rose::ui
         case SDL_EVENT_MOUSE_BUTTON_DOWN:
             if (event.button.windowID != windowId)
             {
+                break;
+            }
+
+
+            if (
+                artifactCards_
+                && (
+                    event.button.button == SDL_BUTTON_LEFT
+                    || event.button.button == SDL_BUTTON_RIGHT)
+                && artifactCards_->handlePointerDown(
+                    event.button.x,
+                    event.button.y,
+                    event.button.button == SDL_BUTTON_RIGHT))
+            {
+                closeContextMenu();
+                endMouseSelection();
                 break;
             }
 
@@ -684,6 +1049,27 @@ namespace rose::ui
                 };
 
 
+                float mouseX{ 0.0f };
+                float mouseY{ 0.0f };
+
+                SDL_GetMouseState(
+                    &mouseX,
+                    &mouseY);
+
+                if (
+                    artifactCards_
+                    && artifactCards_->containsPoint(
+                        mouseX,
+                        mouseY))
+                {
+                    artifactCards_->scrollBy(
+                        -wheelY
+                        * scrollPixelsPerUnit);
+
+                    break;
+                }
+
+
                 transcriptScrollOffset_ =
                     std::clamp(
                         transcriptScrollOffset_
@@ -747,6 +1133,44 @@ namespace rose::ui
         {
             refreshInputText();
         }
+    }
+
+
+    void SdlChatWindow::show()
+    {
+        SDL_ShowWindow(window_.get());
+        SDL_RaiseWindow(window_.get());
+        SDL_StartTextInput(window_.get());
+    }
+
+
+    void SdlChatWindow::hide() noexcept
+    {
+        if (window_)
+        {
+            SDL_StopTextInput(window_.get());
+            SDL_HideWindow(window_.get());
+        }
+    }
+
+
+    bool SdlChatWindow::visible() const noexcept
+    {
+        if (!window_)
+        {
+            return false;
+        }
+
+        return (SDL_GetWindowFlags(window_.get()) & SDL_WINDOW_HIDDEN) == 0;
+    }
+
+
+    void SdlChatWindow::setDraftText(std::string text)
+    {
+        inputText_ = std::move(text);
+        inputCursorByteOffset_ = inputText_.size();
+        inputSelectionAnchorByteOffset_.reset();
+        inputTextDirty_ = true;
     }
 
 
@@ -858,6 +1282,19 @@ namespace rose::ui
 
             inputWrapWidth_ =
                 inputWrapWidth;
+
+
+            if (!TTF_SetTextWrapWidth(
+                attachmentSummaryText_.get(),
+                inputWrapWidth))
+            {
+                throw std::runtime_error{
+                    std::string{
+                        "Could not update Rose attachment-summary wrapping: "
+                    }
+                    + SDL_GetError()
+                };
+            }
         }
 
 
@@ -879,6 +1316,26 @@ namespace rose::ui
         }
 
 
+        int attachmentTextWidth{ 0 };
+        int attachmentTextHeight{ 0 };
+
+        if (!pendingAttachments_.empty())
+        {
+            if (!TTF_GetTextSize(
+                attachmentSummaryText_.get(),
+                &attachmentTextWidth,
+                &attachmentTextHeight))
+            {
+                throw std::runtime_error{
+                    std::string{
+                        "Could not measure Rose attachment-summary text: "
+                    }
+                    + SDL_GetError()
+                };
+            }
+        }
+
+
         // Empty text may report zero height. Keep one visible editing line.
         const int laidOutInputHeight =
             std::max(
@@ -897,8 +1354,22 @@ namespace rose::ui
                 maximumVisibleInputTextHeight);
 
 
+        constexpr float attachmentTextBottomGap{
+            6.0f
+        };
+
+
+        const float attachmentSectionHeight =
+            pendingAttachments_.empty()
+                ? 0.0f
+                : static_cast<float>(
+                    attachmentTextHeight)
+                    + attachmentTextBottomGap;
+
+
         const float inputAreaHeight =
             inputTextTopPadding
+            + attachmentSectionHeight
             + static_cast<float>(
                 visibleInputTextHeight)
             + inputTextBottomPadding;
@@ -919,9 +1390,15 @@ namespace rose::ui
             + inputTextLeftPadding;
 
 
-        const float inputViewportTop =
+        const float attachmentTextY =
             inputArea.y
             + inputTextTopPadding;
+
+
+        const float inputViewportTop =
+            inputArea.y
+            + inputTextTopPadding
+            + attachmentSectionHeight;
 
 
         const float inputViewportHeight =
@@ -1031,12 +1508,70 @@ namespace rose::ui
                 - scrollbarWidth);
 
 
-        const int transcriptHeight =
+        const int transcriptAndArtifactHeight =
             std::max(
                 1,
                 static_cast<int>(
                     inputArea.y)
                 - transcriptComposerGap
+                - transcriptTop);
+
+
+        constexpr int maximumArtifactPanelHeight{
+            220
+        };
+
+        constexpr int transcriptArtifactGap{
+            10
+        };
+
+
+        const int artifactPanelMaximum =
+            std::max(
+                0,
+                std::min(
+                    maximumArtifactPanelHeight,
+                    transcriptAndArtifactHeight / 2));
+
+
+        const int artifactPanelWidth =
+            std::max(
+                1,
+                width
+                - transcriptLeft
+                - transcriptRightPadding);
+
+
+        const int artifactPanelHeight =
+            artifactCards_
+                ? artifactCards_->preferredHeight(
+                    artifactPanelWidth,
+                    artifactPanelMaximum)
+                : 0;
+
+
+        const int artifactPanelBottom =
+            static_cast<int>(
+                inputArea.y)
+            - transcriptComposerGap;
+
+
+        const int artifactPanelTop =
+            artifactPanelBottom
+            - artifactPanelHeight;
+
+
+        const int transcriptBottom =
+            artifactPanelHeight > 0
+                ? artifactPanelTop
+                    - transcriptArtifactGap
+                : artifactPanelBottom;
+
+
+        const int transcriptHeight =
+            std::max(
+                1,
+                transcriptBottom
                 - transcriptTop);
 
 
@@ -1282,6 +1817,22 @@ namespace rose::ui
 
 
         // =====================================================================
+        // Artifact cards
+        // =====================================================================
+        if (artifactCards_)
+        {
+            // Calling render with a zero height intentionally clears the card
+            // stack's last hit-test viewport when a very small window cannot
+            // currently dedicate space to artifacts.
+            artifactCards_->render(
+                transcriptLeft,
+                artifactPanelTop,
+                artifactPanelWidth,
+                artifactPanelHeight);
+        }
+
+
+        // =====================================================================
         // Composer rendering
         // =====================================================================
         SDL_SetRenderDrawColor(
@@ -1295,6 +1846,23 @@ namespace rose::ui
         SDL_RenderFillRect(
             renderer_.get(),
             &inputArea);
+
+
+        if (!pendingAttachments_.empty())
+        {
+            if (!TTF_DrawRendererText(
+                attachmentSummaryText_.get(),
+                inputTextX,
+                attachmentTextY))
+            {
+                throw std::runtime_error{
+                    std::string{
+                        "Could not draw Rose attachment-summary text: "
+                    }
+                    + SDL_GetError()
+                };
+            }
+        }
 
 
         const SDL_Rect inputClip{
@@ -1327,13 +1895,14 @@ namespace rose::ui
 
 
         textLayout_.inputAreaX =
-            inputArea.x;
+            inputTextX;
         textLayout_.inputAreaY =
-            inputArea.y;
+            inputViewportTop;
         textLayout_.inputAreaWidth =
-            inputArea.w;
+            static_cast<float>(
+                inputWrapWidth);
         textLayout_.inputAreaHeight =
-            inputArea.h;
+            inputViewportHeight;
         textLayout_.inputTextX =
             inputTextX;
         textLayout_.inputTextY =
@@ -1467,21 +2036,70 @@ namespace rose::ui
 
         transcriptDirty_ = true;
 
-        if (inputText_.empty())
+        if (
+            inputText_.empty()
+            && pendingAttachments_.empty())
         {
             return;
         }
 
 
-        // Prompt recall stores a bounded session-local copy before inputText_ is
-        // moved into the worker submission.
-        inputRecallHistory_.recordSubmitted(
-            inputText_);
+        if (!inputText_.empty())
+        {
+            // Prompt recall stores only actual typed prompts. Attachment-only
+            // submissions should not add an empty history entry.
+            inputRecallHistory_.recordSubmitted(
+                inputText_);
+        }
 
 
         std::string message =
             std::move(
                 inputText_);
+
+
+        // Build the local transcript label before moving the attachment list into
+        // ChatBridge. Canonical attachment paths stay structured and never need to
+        // be embedded into the user text just to cross the thread boundary.
+        std::string visibleMessage =
+            message;
+
+        if (!pendingAttachments_.empty())
+        {
+            if (!visibleMessage.empty())
+            {
+                visibleMessage +=
+                    "\n";
+            }
+
+            visibleMessage +=
+                "[Attached: ";
+
+            for (std::size_t index = 0;
+                index < pendingAttachments_.size();
+                ++index)
+            {
+                if (index > 0)
+                {
+                    visibleMessage +=
+                        ", ";
+                }
+
+                visibleMessage +=
+                    pendingAttachments_[index].displayName;
+            }
+
+            visibleMessage +=
+                "]";
+        }
+
+
+        std::vector<input::FileAttachment> attachments =
+            std::move(
+                pendingAttachments_);
+
+        pendingAttachments_.clear();
+        refreshAttachmentSummaryText();
 
 
         inputText_.clear();
@@ -1504,15 +2122,24 @@ namespace rose::ui
             std::string{
                 "You: "
             }
-        + message);
+            + (
+                visibleMessage.empty()
+                    ? std::string{
+                        "[Attachment-only request]"
+                    }
+                    : visibleMessage));
 
 
-        chatBridge_.submitUserMessage(
-            std::move(message));
+        chatBridge_.submitUserSubmission(
+            input::UserSubmission{
+                .text =
+                    std::move(message),
+                .attachments =
+                    std::move(attachments)
+            });
 
         transcriptDirty_ = true;
     }
-
 
     void SdlChatWindow::handleChatEvent(
         ChatEvent event)
@@ -1592,6 +2219,18 @@ namespace rose::ui
         }
 
 
+        case ChatEventType::ArtifactReady:
+            if (
+                artifactCards_
+                && event.artifact.has_value())
+            {
+                artifactCards_->appendArtifact(
+                    std::move(*event.artifact));
+            }
+
+            break;
+
+
         case ChatEventType::ConversationCleared:
             transcript_.clear();
 
@@ -1600,6 +2239,13 @@ namespace rose::ui
             // /clear should not leave an invisible RAM-only stack of old prompts
             // behind after the visible conversation has been cleared.
             inputRecallHistory_.clear();
+            clearPendingAttachments();
+
+            if (artifactCards_)
+            {
+                artifactCards_->clear();
+            }
+
             displayedTranscriptText_.clear();
             clearTranscriptSelection();
 
@@ -1611,6 +2257,67 @@ namespace rose::ui
 
             followLatest_ =
                 true;
+
+            break;
+
+
+        case ChatEventType::ConversationReplaced:
+            // Discussion switching replaces only the UI-owned transcript view.
+            // RoseCore separately reloads its canonical working history from the
+            // selected DiscussionConversationStore on the worker thread.
+            transcript_.clear();
+            streamingAssistantText_.clear();
+            inputRecallHistory_.clear();
+            clearPendingAttachments();
+
+            if (artifactCards_)
+            {
+                artifactCards_->clear();
+            }
+
+            for (const ChatTranscriptTurn& turn : event.transcriptTurns)
+            {
+                transcript_.push_back(
+                    std::string{ "You: " }
+                    + turn.userText);
+
+                transcript_.push_back(
+                    std::string{ "Rose: " }
+                    + makeReadableChatText(
+                        turn.assistantText));
+            }
+
+            displayedTranscriptText_.clear();
+            clearTranscriptSelection();
+            transcriptScrollOffset_ = 0.0f;
+            transcriptMaxScrollOffset_ = 0.0f;
+            followLatest_ = true;
+
+            break;
+
+
+        case ChatEventType::Notice:
+            // Informational asynchronous events (for example provider status)
+            // are independent of assistant streaming, just like reminders, but
+            // should not be mislabeled as scheduled errands.
+            transcript_.push_back(
+                std::string{
+                    "Notice: "
+                }
+                + makeReadableChatText(event.text));
+
+            break;
+
+
+        case ChatEventType::Notification:
+            // Background notifications are intentionally independent of the
+            // AssistantStarted/Text/Finished streaming state. A reminder can fire
+            // while the model is generating without corrupting that response.
+            transcript_.push_back(
+                std::string{
+                    "Reminder: "
+                }
+                + makeReadableChatText(event.text));
 
             break;
 

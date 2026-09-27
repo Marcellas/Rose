@@ -163,6 +163,15 @@ namespace rose::agent
 
         case AgentEventType::RunFailed:
             return "RunFailed";
+
+        case AgentEventType::OperationStarted:
+            return "OperationStarted";
+
+        case AgentEventType::OperationFinished:
+            return "OperationFinished";
+
+        case AgentEventType::OperationFailed:
+            return "OperationFailed";
         }
 
         return "Unknown";
@@ -170,8 +179,10 @@ namespace rose::agent
 
 
     AgentJournal::AgentJournal(
-        AgentJournalConfig config)
+        AgentJournalConfig config,
+        IAgentJournalStore* store)
         : config_{ config }
+        , store_{ store }
     {
         if (config_.maximumEvents == 0)
         {
@@ -192,14 +203,21 @@ namespace rose::agent
 
         events_.reserve(
             config_.maximumEvents);
+
+        restoreBestEffort();
     }
 
 
     std::uint64_t AgentJournal::beginRun(
-        const std::string_view userRequest)
+        const std::string_view userRequest,
+        AgentRunProvenance provenance)
     {
         const std::uint64_t runId =
             nextRunId_++;
+
+        runProvenance_.insert_or_assign(
+            runId,
+            provenance);
 
         record(
             AgentEvent{
@@ -207,6 +225,8 @@ namespace rose::agent
                 .type = AgentEventType::RunStarted,
                 .stepIndex = 0,
                 .toolId = {},
+                .projectId = provenance.projectId,
+                .discussionId = provenance.discussionId,
                 .message = "Started bounded agent run.",
                 .detail =
                     "user_request_bytes="
@@ -231,9 +251,37 @@ namespace rose::agent
                 std::chrono::system_clock::now();
         }
 
+        if (event.runId != 0)
+        {
+            const auto provenance =
+                runProvenance_.find(event.runId);
+
+            if (provenance != runProvenance_.end())
+            {
+                if (event.projectId.empty())
+                {
+                    event.projectId = provenance->second.projectId;
+                }
+                if (event.discussionId.empty())
+                {
+                    event.discussionId = provenance->second.discussionId;
+                }
+            }
+        }
+
         event.toolId =
             boundText(
                 event.toolId,
+                config_.maximumMessageBytes);
+
+        event.projectId =
+            boundText(
+                event.projectId,
+                config_.maximumMessageBytes);
+
+        event.discussionId =
+            boundText(
+                event.discussionId,
                 config_.maximumMessageBytes);
 
         event.message =
@@ -245,6 +293,12 @@ namespace rose::agent
             boundText(
                 event.detail,
                 config_.maximumDetailBytes);
+
+        const std::uint64_t completedRunId =
+            (event.type == AgentEventType::RunCompleted
+             || event.type == AgentEventType::RunFailed)
+                ? event.runId
+                : 0;
 
         if (
             events_.size()
@@ -259,16 +313,23 @@ namespace rose::agent
             {
                 nextWriteIndex_ = 0;
             }
+        }
+        else
+        {
+            events_[nextWriteIndex_] =
+                std::move(event);
 
-            return;
+            nextWriteIndex_ =
+                (nextWriteIndex_ + 1)
+                % config_.maximumEvents;
         }
 
-        events_[nextWriteIndex_] =
-            std::move(event);
+        if (completedRunId != 0)
+        {
+            runProvenance_.erase(completedRunId);
+        }
 
-        nextWriteIndex_ =
-            (nextWriteIndex_ + 1)
-            % config_.maximumEvents;
+        persistBestEffort();
     }
 
 
@@ -286,6 +347,8 @@ namespace rose::agent
                 .type = type,
                 .stepIndex = stepIndex,
                 .toolId = request.toolId,
+                .projectId = {},
+                .discussionId = {},
                 .message = std::string{ message },
                 .detail = formatToolRequest(request),
                 .duration = duration
@@ -354,6 +417,14 @@ namespace rose::agent
             << copy.size()
             << " retained event(s).\n";
 
+        if (!persistenceError_.empty())
+        {
+            text
+                << "Persistence warning: "
+                << persistenceError_
+                << "\n";
+        }
+
         for (
             std::size_t index = first;
             index < copy.size();
@@ -395,6 +466,20 @@ namespace rose::agent
                     << event.toolId;
             }
 
+            if (!event.projectId.empty())
+            {
+                text
+                    << " project="
+                    << event.projectId;
+            }
+
+            if (!event.discussionId.empty())
+            {
+                text
+                    << " discussion="
+                    << event.discussionId;
+            }
+
             if (event.duration.count() != 0)
             {
                 text
@@ -427,6 +512,8 @@ namespace rose::agent
     {
         events_.clear();
         nextWriteIndex_ = 0;
+        runProvenance_.clear();
+        persistBestEffort();
     }
 
 
@@ -439,6 +526,92 @@ namespace rose::agent
     std::size_t AgentJournal::capacity() const noexcept
     {
         return config_.maximumEvents;
+    }
+
+
+    const std::string& AgentJournal::persistenceError() const noexcept
+    {
+        return persistenceError_;
+    }
+
+
+    void AgentJournal::restoreBestEffort() noexcept
+    {
+        if (store_ == nullptr)
+        {
+            return;
+        }
+
+        try
+        {
+            std::vector<AgentEvent> loaded = store_->load();
+
+            if (loaded.size() > config_.maximumEvents)
+            {
+                loaded.erase(
+                    loaded.begin(),
+                    loaded.end() - static_cast<std::ptrdiff_t>(config_.maximumEvents));
+            }
+
+            events_ = std::move(loaded);
+            nextWriteIndex_ =
+                events_.size() == config_.maximumEvents
+                    ? 0
+                    : events_.size();
+
+            std::uint64_t maximumSequence{ 0 };
+            std::uint64_t maximumRunId{ 0 };
+            for (const AgentEvent& event : events_)
+            {
+                maximumSequence = (std::max)(maximumSequence, event.sequence);
+                maximumRunId = (std::max)(maximumRunId, event.runId);
+            }
+
+            nextSequence_ = maximumSequence + 1;
+            nextRunId_ = maximumRunId + 1;
+            persistenceError_.clear();
+        }
+        catch (const std::exception& exception)
+        {
+            events_.clear();
+            nextWriteIndex_ = 0;
+            nextSequence_ = 1;
+            nextRunId_ = 1;
+            persistenceError_ = exception.what();
+        }
+        catch (...)
+        {
+            events_.clear();
+            nextWriteIndex_ = 0;
+            nextSequence_ = 1;
+            nextRunId_ = 1;
+            persistenceError_ =
+                "Agent journal persistence failed with an unknown exception.";
+        }
+    }
+
+
+    void AgentJournal::persistBestEffort() noexcept
+    {
+        if (store_ == nullptr)
+        {
+            return;
+        }
+
+        try
+        {
+            store_->save(snapshot());
+            persistenceError_.clear();
+        }
+        catch (const std::exception& exception)
+        {
+            persistenceError_ = exception.what();
+        }
+        catch (...)
+        {
+            persistenceError_ =
+                "Agent journal persistence failed with an unknown exception.";
+        }
     }
 
 

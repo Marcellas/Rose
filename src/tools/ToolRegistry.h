@@ -28,6 +28,13 @@ namespace rose::tools
         void registerTool(
             std::unique_ptr<ITool> tool);
 
+        // Ownership-safe inverse of registerTool(). The caller receives the
+        // removed adapter and decides whether to destroy, reconfigure, or re-register
+        // it. Returns nullptr when the id is not registered.
+        [[nodiscard]]
+        std::unique_ptr<ITool> removeTool(
+            std::string_view toolId) noexcept;
+
         [[nodiscard]]
         ITool* find(
             std::string_view toolId) noexcept;

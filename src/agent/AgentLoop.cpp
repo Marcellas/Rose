@@ -1,8 +1,10 @@
 #include "agent/AgentLoop.h"
 
+#include "agent/CapabilityRoutingGuard.h"
 #include "agent/AgentJournal.h"
 #include "agent/AgentTypes.h"
 #include "agent/ToolObservation.h"
+#include "agent/ToolExecutionService.h"
 #include "agent/ToolSelectionAgent.h"
 #include "logging/Logger.h"
 #include "permissions/ToolExecutionPolicy.h"
@@ -90,6 +92,37 @@ namespace rose::agent
 
 
         [[nodiscard]]
+        std::vector<std::string_view> completedToolIds(
+            const AgentRunState& state)
+        {
+            std::vector<std::string_view> ids;
+            ids.reserve(
+                state.executedRequestFingerprints.size());
+
+
+            for (const std::string& fingerprint :
+                 state.executedRequestFingerprints)
+            {
+                const std::size_t newline =
+                    fingerprint.find('\n');
+
+
+                if (
+                    newline != std::string::npos
+                    && newline > 0)
+                {
+                    ids.emplace_back(
+                        fingerprint.data(),
+                        newline);
+                }
+            }
+
+
+            return ids;
+        }
+
+
+        [[nodiscard]]
         bool alreadyExecuted(
             const AgentRunState& state,
             const std::string_view fingerprint)
@@ -167,13 +200,13 @@ namespace rose::agent
     AgentLoop::AgentLoop(
         ToolSelectionAgent& selectionAgent,
         tools::ToolRegistry& toolRegistry,
-        permissions::ToolExecutionPolicy& executionPolicy,
+        ToolExecutionService& executionService,
         AgentJournal& journal,
         logging::Logger& logger,
         AgentLoopConfig config)
         : selectionAgent_{ selectionAgent }
         , toolRegistry_{ toolRegistry }
-        , executionPolicy_{ executionPolicy }
+        , executionService_{ executionService }
         , journal_{ journal }
         , logger_{ logger }
         , config_{ config }
@@ -189,7 +222,8 @@ namespace rose::agent
 
     AgentLoopResult AgentLoop::start(
         std::string userText,
-        std::string initialTransientContext)
+        std::string initialTransientContext,
+        AgentRunProvenance provenance)
     {
         if (userText.empty())
         {
@@ -200,15 +234,27 @@ namespace rose::agent
 
         const std::uint64_t runId =
             journal_.beginRun(
-                userText);
+                userText,
+                std::move(provenance));
 
         AgentRunState state{
             .runId = runId,
             .originalUserText = std::move(userText),
             .transientContext = std::move(initialTransientContext),
             .executedToolCount = 0,
-            .executedRequestFingerprints = {}
+            .executedRequestFingerprints = {},
+            .toolCompletion = {}
         };
+
+
+        // ToolRegistry is the source of truth for Rose's current operational
+        // capabilities. The contract remains transient and follows the same
+        // AgentRunState through any confirmation pause.
+        appendTransientContext(
+            state.transientContext,
+            CapabilityRoutingGuard::buildCapabilityContract(
+                toolRegistry_));
+
 
         try
         {
@@ -224,6 +270,8 @@ namespace rose::agent
                     .type = AgentEventType::RunFailed,
                     .stepIndex = 0,
                     .toolId = {},
+                    .projectId = {},
+                    .discussionId = {},
                     .message = exception.what(),
                     .detail = {}
                 });
@@ -238,6 +286,8 @@ namespace rose::agent
                     .type = AgentEventType::RunFailed,
                     .stepIndex = 0,
                     .toolId = {},
+                    .projectId = {},
+                    .discussionId = {},
                     .message = "Agent run failed with an unknown exception.",
                     .detail = {}
                 });
@@ -277,6 +327,8 @@ namespace rose::agent
                     .type = AgentEventType::RunFailed,
                     .stepIndex = 0,
                     .toolId = {},
+                    .projectId = {},
+                    .discussionId = {},
                     .message = exception.what(),
                     .detail = {}
                 });
@@ -291,6 +343,8 @@ namespace rose::agent
                     .type = AgentEventType::RunFailed,
                     .stepIndex = 0,
                     .toolId = {},
+                    .projectId = {},
+                    .discussionId = {},
                     .message = "Agent run failed with an unknown exception.",
                     .detail = {}
                 });
@@ -308,6 +362,14 @@ namespace rose::agent
         result.userTextForResponse =
             state.originalUserText;
 
+
+        // A likely tool-backed request may receive one additional control-model
+        // decision if the first pass incorrectly chooses normal response.
+        bool capabilityRecheckUsed{
+            false
+        };
+
+
         auto finishReady =
             [&](const bool reachedLimit = false)
             {
@@ -317,6 +379,8 @@ namespace rose::agent
                         .type = AgentEventType::RunCompleted,
                         .stepIndex = 0,
                         .toolId = {},
+                        .projectId = {},
+                        .discussionId = {},
                         .message =
                             reachedLimit
                                 ? "Agent run completed at the configured tool execution ceiling."
@@ -339,6 +403,11 @@ namespace rose::agent
                 result.reachedToolLimit =
                     reachedLimit;
 
+                result.authoritativeResponse =
+                    state.toolCompletion.
+                        authoritativeResponseIfComplete(
+                            state.executedToolCount);
+
                 return std::move(result);
             };
 
@@ -349,71 +418,6 @@ namespace rose::agent
             {
                 const std::size_t stepIndex =
                     state.executedToolCount + 1;
-
-                const tools::ITool* tool =
-                    toolRegistry_.find(
-                        request.toolId);
-
-                if (tool == nullptr)
-                {
-                    throw std::runtime_error{
-                        "Agent proposed a tool that is no longer registered: "
-                        + request.toolId
-                    };
-                }
-
-                const permissions::ToolExecutionDecision policyDecision =
-                    executionPolicy_.evaluate(
-                        tool->descriptor(),
-                        confirmation);
-
-                if (
-                    policyDecision.disposition
-                    == permissions::ToolExecutionDisposition::RequiresConfirmation)
-                {
-                    journal_.recordToolRequest(
-                        state.runId,
-                        AgentEventType::ConfirmationRequired,
-                        stepIndex,
-                        request,
-                        policyDecision.reason);
-
-                    PendingAgentRun pending{
-                        .state = std::move(state),
-                        .confirmation =
-                            makePendingToolConfirmation(
-                                request,
-                                tool->descriptor())
-                    };
-
-                    result.status =
-                        AgentLoopStatus::RequiresConfirmation;
-
-                    result.userTextForResponse =
-                        pending.state.originalUserText;
-
-                    result.totalExecutedTools =
-                        pending.state.executedToolCount;
-
-                    result.pending =
-                        std::move(pending);
-
-                    return false;
-                }
-
-                if (!policyDecision.allowed())
-                {
-                    journal_.recordToolRequest(
-                        state.runId,
-                        AgentEventType::PolicyDenied,
-                        stepIndex,
-                        request,
-                        policyDecision.reason);
-
-                    throw std::runtime_error{
-                        policyDecision.reason
-                    };
-                }
 
                 const std::string fingerprint =
                     requestFingerprint(
@@ -445,79 +449,50 @@ namespace rose::agent
                     return false;
                 }
 
-                journal_.recordToolRequest(
-                    state.runId,
-                    AgentEventType::ToolStarted,
-                    stepIndex,
-                    request,
-                    "Tool execution started.");
-
-                const auto startedAt =
-                    std::chrono::steady_clock::now();
-
-                tools::ToolResult toolResult;
-
-                try
-                {
-                    toolResult =
-                        toolRegistry_.execute(
-                            request);
-                }
-                catch (const std::exception& exception)
-                {
-                    const auto duration =
-                        std::chrono::duration_cast<std::chrono::milliseconds>(
-                            std::chrono::steady_clock::now()
-                            - startedAt);
-
-                    journal_.recordToolRequest(
-                        state.runId,
-                        AgentEventType::ToolFailed,
-                        stepIndex,
+                ToolExecutionServiceResult execution =
+                    executionService_.execute(
                         request,
-                        exception.what(),
-                        duration);
-
-                    throw;
-                }
-                catch (...)
-                {
-                    const auto duration =
-                        std::chrono::duration_cast<std::chrono::milliseconds>(
-                            std::chrono::steady_clock::now()
-                            - startedAt);
-
-                    journal_.recordToolRequest(
                         state.runId,
-                        AgentEventType::ToolFailed,
                         stepIndex,
-                        request,
-                        "Tool execution failed with an unknown exception.",
-                        duration);
+                        confirmation);
 
-                    throw;
+                if (execution.status
+                    == ToolExecutionServiceStatus::RequiresConfirmation)
+                {
+                    PendingAgentRun pending{
+                        .state = std::move(state),
+                        .confirmation =
+                            makePendingToolConfirmation(
+                                request,
+                                execution.descriptor)
+                    };
+
+                    result.status =
+                        AgentLoopStatus::RequiresConfirmation;
+                    result.userTextForResponse =
+                        pending.state.originalUserText;
+                    result.totalExecutedTools =
+                        pending.state.executedToolCount;
+                    result.pending = std::move(pending);
+                    return false;
                 }
 
-                const auto duration =
-                    std::chrono::duration_cast<std::chrono::milliseconds>(
-                        std::chrono::steady_clock::now()
-                        - startedAt);
+                if (execution.status == ToolExecutionServiceStatus::Denied)
+                {
+                    throw std::runtime_error{ execution.reason };
+                }
 
-                journal_.recordToolRequest(
-                    state.runId,
-                    AgentEventType::ToolFinished,
-                    stepIndex,
-                    request,
-                    toolResult.message.empty()
-                        ? "Tool execution completed."
-                        : toolResult.message,
-                    duration);
+                tools::ToolResult toolResult =
+                    std::move(execution.result);
 
                 appendTransientContext(
                     state.transientContext,
                     buildToolObservation(
                         request,
                         toolResult));
+
+                state.toolCompletion.observe(
+                    toolResult);
 
                 appendArtifacts(
                     result.artifacts,
@@ -592,6 +567,8 @@ namespace rose::agent
                         invokesTool
                             ? decision.toolRequest->toolId
                             : std::string{},
+                    .projectId = {},
+                    .discussionId = {},
                     .message =
                         invokesTool
                             ? "Control model selected a tool as the next action."
@@ -604,6 +581,136 @@ namespace rose::agent
 
             if (!invokesTool)
             {
+                const bool likelyToolRequest =
+                    CapabilityRoutingGuard::likelyToolBackedRequest(
+                        state.originalUserText,
+                        toolRegistry_);
+
+
+                const std::vector<std::string_view> completed =
+                    likelyToolRequest
+                        ? completedToolIds(
+                            state)
+                        : std::vector<std::string_view>{};
+
+                const std::optional<tools::ToolRequest> recoverableRequest =
+                    likelyToolRequest
+                        ? CapabilityRoutingGuard::recoverDirectToolRequest(
+                            state.originalUserText,
+                            toolRegistry_,
+                            completed,
+                            state.transientContext)
+                        : std::nullopt;
+
+
+                // Re-check only while a concrete direct tool action remains
+                // unsatisfied. Once generate_image has already completed for the
+                // request, normal RESPOND should finish the run immediately.
+                if (
+                    !capabilityRecheckUsed
+                    && recoverableRequest.has_value())
+                {
+                    capabilityRecheckUsed =
+                        true;
+
+
+                    appendTransientContext(
+                        state.transientContext,
+                        CapabilityRoutingGuard::buildRecheckGuard(
+                            state.executedToolCount));
+
+
+                    logger_.debug(
+                        "AgentLoop",
+                        "Control model selected RESPOND while an unsatisfied direct "
+                        "registered-tool request remains; performing one bounded "
+                        "capability re-check.");
+
+
+                    journal_.record(
+                        AgentEvent{
+                            .runId = state.runId,
+                            .type = AgentEventType::DecisionMade,
+                            .stepIndex = 0,
+                            .toolId = {},
+                            .projectId = {},
+                            .discussionId = {},
+                            .message =
+                                "Scheduled one bounded capability re-check after a "
+                                "normal-response decision with an unsatisfied direct "
+                                "tool request.",
+                            .detail =
+                                "capability_recheck=true"
+                        });
+
+
+                    continue;
+                }
+
+
+                if (likelyToolRequest)
+                {
+                    if (recoverableRequest.has_value())
+                    {
+                        const tools::ToolRequest& recovered =
+                            *recoverableRequest;
+                        logger_.debug(
+                            "AgentLoop",
+                            "Recovered an obvious direct tool request after two "
+                            "model routing passes selected RESPOND: "
+                            + recovered.toolId);
+
+
+                        journal_.recordToolRequest(
+                            state.runId,
+                            AgentEventType::ToolProposed,
+                            nextStepIndex,
+                            recovered,
+                            "Deterministic direct-request recovery proposed this "
+                            "registered tool after two normal-response decisions.");
+
+
+                        const bool continued =
+                            executeOne(
+                                recovered,
+                                permissions::ToolConfirmationState::NotConfirmed);
+
+
+                        if (!continued)
+                        {
+                            if (
+                                result.status
+                                == AgentLoopStatus::RequiresConfirmation)
+                            {
+                                return result;
+                            }
+
+
+                            appendTransientContext(
+                                state.transientContext,
+                                CapabilityRoutingGuard::buildExecutionEvidenceGuard(
+                                    state.executedToolCount));
+
+
+                            return finishReady();
+                        }
+
+
+                        continue;
+                    }
+
+
+                    // If we recognized the request as tool-like but cannot safely
+                    // reconstruct an exact request (for example "read a file" with
+                    // no absolute path), prevent the final model from hallucinating
+                    // that the action already happened.
+                    appendTransientContext(
+                        state.transientContext,
+                        CapabilityRoutingGuard::buildExecutionEvidenceGuard(
+                            state.executedToolCount));
+                }
+
+
                 return finishReady();
             }
 
@@ -639,6 +746,8 @@ namespace rose::agent
                 .type = AgentEventType::StepLimitReached,
                 .stepIndex = 0,
                 .toolId = {},
+                .projectId = {},
+                .discussionId = {},
                 .message =
                     "Stopped before another tool because the configured execution ceiling was reached.",
                 .detail =

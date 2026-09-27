@@ -71,10 +71,22 @@ namespace rose::tools
     };
 
 
+    enum class ToolResponseMode
+    {
+        RequiresModelSynthesis,
+        AuthoritativeCompletion
+    };
+
+
     struct ToolResult
     {
         bool success{ true };
         std::string message;
+
+        ToolResponseMode responseMode{
+            ToolResponseMode::RequiresModelSynthesis
+        };
+
         std::vector<artifacts::Artifact> artifacts;
     };
 

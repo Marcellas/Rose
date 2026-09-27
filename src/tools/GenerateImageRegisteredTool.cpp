@@ -1,8 +1,10 @@
 #include "tools/GenerateImageRegisteredTool.h"
 
-#include "imagegen/ImageGenerationTypes.h"
+#include "imagegen/ImageGenerationProfiles.h"
 
 #include <charconv>
+#include <cstdint>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -78,6 +80,83 @@ namespace rose::tools
 
 
         [[nodiscard]]
+        std::optional<std::int64_t> parseOptionalInt64(
+            const ToolRequest& request,
+            const std::string_view name)
+        {
+            const auto found =
+                request.arguments.find(
+                    std::string{ name });
+
+            if (found == request.arguments.end())
+            {
+                return std::nullopt;
+            }
+
+            std::int64_t value{};
+            const std::string& text = found->second;
+
+            const auto [end, error] =
+                std::from_chars(
+                    text.data(),
+                    text.data() + text.size(),
+                    value);
+
+            if (
+                error != std::errc{}
+                || end != text.data() + text.size())
+            {
+                throw std::invalid_argument{
+                    "Tool argument '"
+                    + std::string{ name }
+                    + "' must be an integer."
+                };
+            }
+
+            return value;
+        }
+
+
+        [[nodiscard]]
+        policy::SubjectLifeStage parseOptionalSubjectMaturity(
+            const ToolRequest& request)
+        {
+            const auto found =
+                request.arguments.find(
+                    "subject_maturity");
+
+            if (found == request.arguments.end())
+            {
+                return policy::SubjectLifeStage::Unknown;
+            }
+
+            const std::string& value =
+                found->second;
+
+            if (value == "adult")
+            {
+                return policy::SubjectLifeStage::Adult;
+            }
+
+            if (value == "juvenile")
+            {
+                return policy::SubjectLifeStage::Juvenile;
+            }
+
+            if (
+                value.empty()
+                || value == "unknown")
+            {
+                return policy::SubjectLifeStage::Unknown;
+            }
+
+            throw std::invalid_argument{
+                "Tool argument 'subject_maturity' must be adult, juvenile, or unknown."
+            };
+        }
+
+
+        [[nodiscard]]
         float parseOptionalFloat(
             const ToolRequest& request,
             const std::string_view name,
@@ -138,27 +217,39 @@ namespace rose::tools
                     .required = true
                 },
                 ToolParameterDescriptor{
-                    .name = "width",
-                    .description = "Output width in pixels. Default 512.",
+                    .name = "quality",
+                    .description =
+                        "Intent-level render effort/resolution: draft, standard, "
+                        "or high. Default standard. Omit unless the user expresses "
+                        "a quality/detail/resolution/speed preference. Content words "
+                        "such as explicit, nude, mature, or adult do not imply high. "
+                        "Do not invent diffusion steps/CFG.",
+                    .type = ToolValueType::String,
+                    .required = false
+                },
+                ToolParameterDescriptor{
+                    .name = "aspect_ratio",
+                    .description =
+                        "Composition: auto, square, portrait, landscape, or wide. "
+                        "Use auto when the user's composition intent is unclear.",
+                    .type = ToolValueType::String,
+                    .required = false
+                },
+                ToolParameterDescriptor{
+                    .name = "seed",
+                    .description =
+                        "Optional deterministic image seed. Omit unless the user "
+                        "requests repeatability or a specific seed.",
                     .type = ToolValueType::Integer,
                     .required = false
                 },
                 ToolParameterDescriptor{
-                    .name = "height",
-                    .description = "Output height in pixels. Default 512.",
-                    .type = ToolValueType::Integer,
-                    .required = false
-                },
-                ToolParameterDescriptor{
-                    .name = "steps",
-                    .description = "Diffusion sampling steps. Default 20.",
-                    .type = ToolValueType::Integer,
-                    .required = false
-                },
-                ToolParameterDescriptor{
-                    .name = "cfg_scale",
-                    .description = "Classifier-free guidance scale. Default 7.0.",
-                    .type = ToolValueType::Number,
+                    .name = "subject_maturity",
+                    .description =
+                        "Optional maturity context for depicted subjects: adult, "
+                        "juvenile, or unknown. This means life stage for the "
+                        "species; height/stature does not determine maturity.",
+                    .type = ToolValueType::String,
                     .required = false
                 }
             }
@@ -183,69 +274,105 @@ namespace rose::tools
             };
         }
 
-        imagegen::ImageGenerationRequest imageRequest;
-        imageRequest.prompt =
+        imagegen::ImageGenerationIntent imageIntent;
+        imageIntent.prompt =
             requiredArgument(
                 request,
                 "prompt");
 
-        imageRequest.width =
-            parseOptionalInt(
-                request,
-                "width",
-                512);
+        const auto qualityFound =
+            request.arguments.find(
+                "quality");
 
-        imageRequest.height =
-            parseOptionalInt(
-                request,
-                "height",
-                512);
+        imageIntent.quality =
+            imagegen::parseImageGenerationQuality(
+                qualityFound == request.arguments.end()
+                    ? std::string_view{}
+                    : std::string_view{
+                        qualityFound->second
+                    });
 
-        imageRequest.steps =
-            parseOptionalInt(
-                request,
-                "steps",
-                20);
+        const auto aspectFound =
+            request.arguments.find(
+                "aspect_ratio");
 
-        imageRequest.cfgScale =
-            parseOptionalFloat(
-                request,
-                "cfg_scale",
-                7.0f);
+        imageIntent.aspectRatio =
+            imagegen::parseImageAspectRatio(
+                aspectFound == request.arguments.end()
+                    ? std::string_view{}
+                    : std::string_view{
+                        aspectFound->second
+                    });
 
-        if (
-            imageRequest.width <= 0
-            || imageRequest.height <= 0)
+        imageIntent.seed =
+            parseOptionalInt64(
+                request,
+                "seed");
+
+        // Compatibility bridge for older development requests/checkpoints.
+        // These arguments are intentionally absent from the descriptor, so the
+        // Agent is no longer encouraged to reason about diffusion internals.
+        if (request.arguments.contains("width"))
         {
-            throw std::invalid_argument{
-                "Image width and height must be greater than zero."
-            };
+            imageIntent.widthOverride =
+                parseOptionalInt(
+                    request,
+                    "width",
+                    512);
         }
 
-        if (imageRequest.steps <= 0)
+        if (request.arguments.contains("height"))
         {
-            throw std::invalid_argument{
-                "Image generation steps must be greater than zero."
-            };
+            imageIntent.heightOverride =
+                parseOptionalInt(
+                    request,
+                    "height",
+                    512);
         }
 
-        if (imageRequest.cfgScale <= 0.0f)
+        if (request.arguments.contains("steps"))
         {
-            throw std::invalid_argument{
-                "Image generation cfg_scale must be greater than zero."
-            };
+            imageIntent.stepsOverride =
+                parseOptionalInt(
+                    request,
+                    "steps",
+                    20);
         }
 
-        artifacts::Artifact artifact =
+        if (request.arguments.contains("cfg_scale"))
+        {
+            imageIntent.cfgScaleOverride =
+                parseOptionalFloat(
+                    request,
+                    "cfg_scale",
+                    7.0f);
+        }
+
+        const policy::SubjectLifeStage subjectMaturity =
+            parseOptionalSubjectMaturity(
+                request);
+
+        GeneratedImageOutcome generated =
             generateImageTool_.generate(
-                imageRequest);
+                imageIntent,
+                subjectMaturity);
 
         ToolResult result;
         result.success = true;
         result.message =
-            "Generated the image locally with stable-diffusion.cpp.";
+            "Generated the image successfully with profile '"
+            + generated.profileName
+            + "' at "
+            + std::to_string(generated.width)
+            + "x"
+            + std::to_string(generated.height)
+            + ".";
+
+        result.responseMode =
+            ToolResponseMode::AuthoritativeCompletion;
+
         result.artifacts.push_back(
-            std::move(artifact));
+            std::move(generated.artifact));
 
         return result;
     }

@@ -1,6 +1,8 @@
 #pragma once
 
 #include "platform/SdlRuntime.h"
+#include "input/UserSubmission.h"
+#include "ui/ArtifactCardStack.h"
 #include "ui/ChatBridge.h"
 #include "ui/TextEditHistory.h"
 #include "ui/InputRecallHistory.h"
@@ -74,6 +76,16 @@ namespace rose::ui
 
         void render();
 
+        // Presence-first desktop shell controls. Closing the chat window now hides
+        // it instead of shutting Rose down; the avatar context menu can reopen it.
+        void show();
+        void hide() noexcept;
+        [[nodiscard]] bool visible() const noexcept;
+
+        // Replace the composer text without submitting it. Menu actions can use
+        // this to guide the user into an existing conversational workflow.
+        void setDraftText(std::string text);
+
 
     private:
         struct FontDeleter
@@ -142,6 +154,28 @@ namespace rose::ui
 
         void handleChatEvent(
             ChatEvent event);
+
+
+        // -------------------------------------------------------------------------
+        // Attachments
+        // -------------------------------------------------------------------------
+        //
+        // Dropped files are staged in the composer until the user presses Enter.
+        // Only paths cross the UI -> worker boundary; reading/parsing remains
+        // worker-owned through AttachmentIngestion.
+        void addDroppedFile(
+            const char* utf8Path);
+
+        [[nodiscard]]
+        bool removeDroppedFile(
+            const std::filesystem::path& path);
+
+        void clearPendingAttachments();
+
+        void refreshAttachmentSummaryText();
+
+        [[nodiscard]]
+        std::string pendingAttachmentSummary() const;
 
 
         // -------------------------------------------------------------------------
@@ -485,6 +519,14 @@ namespace rose::ui
         TextPtr contextMenuSelectAllText_;
         TextPtr contextMenuCopyMessageText_;
 
+        // One persistent label summarizes files staged by drag/drop. It borrows
+        // font_ and textEngine_ and is destroyed before them.
+        TextPtr attachmentSummaryText_;
+
+        // Artifact cards own only UI presentation resources (TTF text + image
+        // textures). Artifact files themselves remain owned by ArtifactStore.
+        std::unique_ptr<ArtifactCardStack> artifactCards_;
+
         // Canonical composer contents. Visual wrapping is presentation only.
         std::string inputText_;
 
@@ -515,6 +557,10 @@ namespace rose::ui
         // A negative value means the next vertical movement should capture the
         // current caret column first.
         float preferredCaretX_{ -1.0f };
+
+        // Files dropped onto the chat window but not yet submitted. This list is
+        // session/UI state only and is moved into one UserSubmission on Enter.
+        std::vector<input::FileAttachment> pendingAttachments_;
 
         std::vector<std::string> transcript_;
 

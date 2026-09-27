@@ -1,6 +1,8 @@
 #pragma once
 
+#include "agent/ToolCompletionAccumulator.h"
 #include "agent/ToolConfirmation.h"
+#include "agent/AgentJournal.h"
 #include "artifacts/Artifact.h"
 
 #include <cstddef>
@@ -14,11 +16,6 @@ namespace rose::logging
     class Logger;
 }
 
-namespace rose::permissions
-{
-    class ToolExecutionPolicy;
-}
-
 namespace rose::tools
 {
     class ToolRegistry;
@@ -28,6 +25,7 @@ namespace rose::tools
 namespace rose::agent
 {
     class AgentJournal;
+    class ToolExecutionService;
     class ToolSelectionAgent;
 
     enum class AgentLoopStatus
@@ -56,6 +54,8 @@ namespace rose::agent
         // this run. This prevents an imperfect model from repeatedly issuing the
         // exact same side effect until the step budget is exhausted.
         std::vector<std::string> executedRequestFingerprints;
+
+        ToolCompletionAccumulator toolCompletion;
     };
 
 
@@ -92,6 +92,8 @@ namespace rose::agent
 
         std::optional<PendingAgentRun> pending;
 
+        std::optional<std::string> authoritativeResponse;
+
         std::size_t totalExecutedTools{ 0 };
         bool reachedToolLimit{ false };
     };
@@ -112,7 +114,7 @@ namespace rose::agent
     // execution ceiling is reached.
     //
     // Ownership:
-    //   AgentLoop borrows ToolSelectionAgent, ToolRegistry, ToolExecutionPolicy,
+    //   AgentLoop borrows ToolSelectionAgent, ToolRegistry, ToolExecutionService,
     //   AgentJournal, and Logger. All remain worker-thread-owned and must outlive
     //   AgentLoop.
     class AgentLoop final
@@ -121,7 +123,7 @@ namespace rose::agent
         AgentLoop(
             ToolSelectionAgent& selectionAgent,
             tools::ToolRegistry& toolRegistry,
-            permissions::ToolExecutionPolicy& executionPolicy,
+            ToolExecutionService& executionService,
             AgentJournal& journal,
             logging::Logger& logger,
             AgentLoopConfig config = {});
@@ -129,7 +131,8 @@ namespace rose::agent
         [[nodiscard]]
         AgentLoopResult start(
             std::string userText,
-            std::string initialTransientContext = {});
+            std::string initialTransientContext = {},
+            AgentRunProvenance provenance = {});
 
         // Resume after the user explicitly confirms the exact pending request.
         [[nodiscard]]
@@ -144,7 +147,7 @@ namespace rose::agent
 
         ToolSelectionAgent& selectionAgent_;
         tools::ToolRegistry& toolRegistry_;
-        permissions::ToolExecutionPolicy& executionPolicy_;
+        ToolExecutionService& executionService_;
         AgentJournal& journal_;
         logging::Logger& logger_;
         AgentLoopConfig config_;

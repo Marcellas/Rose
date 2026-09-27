@@ -9,6 +9,12 @@
 #include <memory>
 #include <string_view>
 
+namespace rose::memory
+{
+    class IMemoryObserver;
+    class IMemoryRetriever;
+}
+
 namespace rose::model
 {
     class IModelProvider;
@@ -17,6 +23,11 @@ namespace rose::model
 namespace rose::persistence
 {
     class IConversationStore;
+}
+
+namespace rose::policy
+{
+    class ContentPolicy;
 }
 
 namespace rose::core
@@ -31,6 +42,9 @@ namespace rose::core
             std::unique_ptr<model::IModelProvider> modelProvider,
             logging::Logger& logger,
             persistence::IConversationStore& conversationStore,
+            const policy::ContentPolicy& contentPolicy,
+            memory::IMemoryRetriever* memoryRetriever = nullptr,
+            memory::IMemoryObserver* memoryObserver = nullptr,
             conversation::ConversationConfig config = {});
 
 
@@ -54,7 +68,18 @@ namespace rose::core
             const RoseActivityCallback& onActivity);
 
 
+        void commitAuthoritativeTurn(
+            std::string_view userText,
+            std::string_view assistantText);
+
+
         void clearConversation();
+
+        // Reload the in-memory working history from the currently selected
+        // IConversationStore. This is the hand-off point used when the desktop
+        // switches between persistent Discussion transcripts. The model provider
+        // remains loaded and Rose's long-term memory repository is untouched.
+        void reloadConversation();
 
         [[nodiscard]]
         std::size_t conversationMessageCount() const noexcept;
@@ -68,6 +93,19 @@ namespace rose::core
         conversation::Conversation conversation_;
 
         persistence::IConversationStore& conversationStore_;
+
+        // Optional borrowed long-term-memory retrieval boundary. RoseCore does
+        // not own or mutate long-term memory; it only asks for a bounded set of
+        // relevant records for the current request.
+        memory::IMemoryRetriever* memoryRetriever_{ nullptr };
+
+        // Optional borrowed post-commit observer for bounded temporary-memory
+        // consolidation. Durable persistence remains owned by memory modules.
+        memory::IMemoryObserver* memoryObserver_{ nullptr };
+
+        // Borrowed application-lifetime policy. RoseCore uses it only to build
+        // provider-neutral behavior guidance; tool enforcement remains separate.
+        const policy::ContentPolicy& contentPolicy_;
     };
 
 } // namespace rose::core

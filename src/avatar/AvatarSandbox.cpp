@@ -25,6 +25,9 @@ int main()
         avatar.loadSprite(
             "assets/avatar/RoseIdle.png");
 
+        avatar.loadDefaultAnimations(
+            "assets/avatar");
+
         rose::avatar::AvatarController controller{
             avatar
         };
@@ -34,8 +37,10 @@ int main()
             std::chrono::steady_clock;
 
 
+        // Long enough to see the slowed source animation plus any inserted
+        // sit/stand transition before the sandbox advances to the next state.
         constexpr std::chrono::milliseconds stateDuration{
-            1200
+            5000
         };
 
 
