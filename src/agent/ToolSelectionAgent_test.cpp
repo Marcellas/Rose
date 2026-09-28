@@ -9,6 +9,7 @@
 #include <array>
 #include <cstdlib>
 #include <filesystem>
+#include <fstream>
 #include <iostream>
 #include <memory>
 #include <string>
@@ -31,6 +32,59 @@ namespace
             std::exit(1);
         }
     }
+
+
+    class CTestRecoveryFixture final
+    {
+    public:
+        CTestRecoveryFixture()
+        {
+#ifdef _WIN32
+            source_ =
+                std::filesystem::temp_directory_path()
+                / "RoseToolSelectionAgentCTestRecovery";
+#else
+            // CapabilityRoutingGuard intentionally recognizes Windows paths even
+            // in portable unit tests. On non-Windows hosts a drive-qualified
+            // string is a legal relative filename, so it gives us a deterministic
+            // fixture without weakening production path validation.
+            source_ =
+                std::filesystem::path{
+                    R"(C:\RoseToolSelectionAgentCTestRecovery)"
+                };
+#endif
+
+            std::error_code error;
+            std::filesystem::remove_all(source_, error);
+            error.clear();
+            std::filesystem::create_directories(source_ / "build", error);
+            require(!error, "CTest recovery fixture directory must be creatable");
+
+            std::ofstream{ source_ / "CMakeLists.txt" }
+                << "cmake_minimum_required(VERSION 3.20)\n";
+            std::ofstream{ source_ / "build" / "CMakeCache.txt" }
+                << "# fixture\n";
+            std::ofstream{ source_ / "build" / "CTestTestfile.cmake" }
+                << "# fixture\n";
+        }
+
+
+        ~CTestRecoveryFixture()
+        {
+            std::error_code ignored;
+            std::filesystem::remove_all(source_, ignored);
+        }
+
+
+        [[nodiscard]]
+        std::string requestPath() const
+        {
+            return source_.string();
+        }
+
+    private:
+        std::filesystem::path source_;
+    };
 
 
     class FixedResponseModelProvider final
@@ -143,6 +197,24 @@ namespace
                     .type = rose::tools::ToolValueType::String,
                     .required = true
                 });
+            if (descriptor_.id == "read_text_file")
+            {
+                descriptor_.parameters.push_back(
+                    rose::tools::ToolParameterDescriptor{
+                        .name = "start_line",
+                        .description = "Optional one-based start line.",
+                        .type = rose::tools::ToolValueType::Integer,
+                        .required = false
+                    });
+                descriptor_.parameters.push_back(
+                    rose::tools::ToolParameterDescriptor{
+                        .name = "line_count",
+                        .description = "Optional bounded line count.",
+                        .type = rose::tools::ToolValueType::Integer,
+                        .required = false
+                    });
+            }
+
         }
 
         [[nodiscard]]
@@ -200,6 +272,212 @@ namespace
         [[nodiscard]]
         rose::tools::ToolResult execute(
             const rose::tools::ToolRequest&) override
+        {
+            return {};
+        }
+
+    private:
+        rose::tools::ToolDescriptor descriptor_;
+    };
+
+
+    class TextMutationDummyTool final
+        : public rose::tools::ITool
+    {
+    public:
+        explicit TextMutationDummyTool(std::string id)
+        {
+            descriptor_.id = std::move(id);
+            descriptor_.displayName = descriptor_.id;
+            descriptor_.description = "Test text mutation tool.";
+            descriptor_.risk = rose::tools::ToolRisk::LocalWrite;
+            descriptor_.consent = rose::tools::ToolConsent::RequiresConfirmation;
+
+            descriptor_.parameters.push_back(
+                rose::tools::ToolParameterDescriptor{
+                    .name = "path",
+                    .description = "Text/source path.",
+                    .type = rose::tools::ToolValueType::String,
+                    .required = true
+                });
+
+            if (descriptor_.id == "create_text_file")
+            {
+                descriptor_.parameters.push_back(
+                    rose::tools::ToolParameterDescriptor{
+                        .name = "content",
+                        .description = "Initial content.",
+                        .type = rose::tools::ToolValueType::String,
+                        .required = false
+                    });
+            }
+            else
+            {
+                descriptor_.parameters.push_back(
+                    rose::tools::ToolParameterDescriptor{
+                        .name = "operation",
+                        .description = "Text mutation operation.",
+                        .type = rose::tools::ToolValueType::String,
+                        .required = true
+                    });
+                descriptor_.parameters.push_back(
+                    rose::tools::ToolParameterDescriptor{
+                        .name = "find_text",
+                        .description = "Exact source text.",
+                        .type = rose::tools::ToolValueType::String,
+                        .required = false
+                    });
+                descriptor_.parameters.push_back(
+                    rose::tools::ToolParameterDescriptor{
+                        .name = "replacement_text",
+                        .description = "Replacement source text.",
+                        .type = rose::tools::ToolValueType::String,
+                        .required = false
+                    });
+                descriptor_.parameters.push_back(
+                    rose::tools::ToolParameterDescriptor{
+                        .name = "text",
+                        .description = "Appended source text.",
+                        .type = rose::tools::ToolValueType::String,
+                        .required = false
+                    });
+                descriptor_.parameters.push_back(
+                    rose::tools::ToolParameterDescriptor{
+                        .name = "start_line",
+                        .description = "First source line.",
+                        .type = rose::tools::ToolValueType::Integer,
+                        .required = false
+                    });
+                descriptor_.parameters.push_back(
+                    rose::tools::ToolParameterDescriptor{
+                        .name = "line_count",
+                        .description = "Source line count.",
+                        .type = rose::tools::ToolValueType::Integer,
+                        .required = false
+                    });
+                descriptor_.parameters.push_back(
+                    rose::tools::ToolParameterDescriptor{
+                        .name = "expected_text",
+                        .description = "Expected line preimage.",
+                        .type = rose::tools::ToolValueType::String,
+                        .required = false
+                    });
+            }
+        }
+
+        [[nodiscard]]
+        const rose::tools::ToolDescriptor& descriptor() const noexcept override
+        {
+            return descriptor_;
+        }
+
+        [[nodiscard]]
+        rose::tools::ToolResult execute(const rose::tools::ToolRequest&) override
+        {
+            return {};
+        }
+
+    private:
+        rose::tools::ToolDescriptor descriptor_;
+    };
+
+
+    class CMakeBuildDummyTool final
+        : public rose::tools::ITool
+    {
+    public:
+        CMakeBuildDummyTool()
+        {
+            descriptor_.id = "build_cmake_project";
+            descriptor_.displayName = descriptor_.id;
+            descriptor_.description = "Build one exact CMake project.";
+            descriptor_.risk = rose::tools::ToolRisk::ExternalEffect;
+            descriptor_.consent = rose::tools::ToolConsent::RequiresConfirmation;
+            descriptor_.parameters = {
+                { .name = "source_path", .description = "Source directory.", .type = rose::tools::ToolValueType::String, .required = true },
+                { .name = "configuration", .description = "Configuration.", .type = rose::tools::ToolValueType::String, .required = false },
+                { .name = "target", .description = "Target.", .type = rose::tools::ToolValueType::String, .required = false },
+                { .name = "jobs", .description = "Parallel jobs.", .type = rose::tools::ToolValueType::Integer, .required = false }
+            };
+        }
+
+        [[nodiscard]]
+        const rose::tools::ToolDescriptor& descriptor() const noexcept override
+        {
+            return descriptor_;
+        }
+
+        [[nodiscard]]
+        rose::tools::ToolResult execute(const rose::tools::ToolRequest&) override
+        {
+            return {};
+        }
+
+    private:
+        rose::tools::ToolDescriptor descriptor_;
+    };
+
+
+    class CMakeConfigureDummyTool final
+        : public rose::tools::ITool
+    {
+    public:
+        CMakeConfigureDummyTool()
+        {
+            descriptor_.id = "reconfigure_cmake_project";
+            descriptor_.displayName = descriptor_.id;
+            descriptor_.description = "Reconfigure one exact existing CMake build tree.";
+            descriptor_.risk = rose::tools::ToolRisk::ExternalEffect;
+            descriptor_.consent = rose::tools::ToolConsent::RequiresConfirmation;
+            descriptor_.parameters = {
+                { .name = "source_path", .description = "Source directory.", .type = rose::tools::ToolValueType::String, .required = true }
+            };
+        }
+
+        [[nodiscard]]
+        const rose::tools::ToolDescriptor& descriptor() const noexcept override
+        {
+            return descriptor_;
+        }
+
+        [[nodiscard]]
+        rose::tools::ToolResult execute(const rose::tools::ToolRequest&) override
+        {
+            return {};
+        }
+
+    private:
+        rose::tools::ToolDescriptor descriptor_;
+    };
+
+
+    class CMakeTestDummyTool final
+        : public rose::tools::ITool
+    {
+    public:
+        CMakeTestDummyTool()
+        {
+            descriptor_.id = "run_cmake_tests";
+            descriptor_.displayName = descriptor_.id;
+            descriptor_.description = "Run registered CTest tests for one exact CMake project.";
+            descriptor_.risk = rose::tools::ToolRisk::ExternalEffect;
+            descriptor_.consent = rose::tools::ToolConsent::RequiresConfirmation;
+            descriptor_.parameters = {
+                { .name = "source_path", .description = "Source directory.", .type = rose::tools::ToolValueType::String, .required = true },
+                { .name = "configuration", .description = "Configuration.", .type = rose::tools::ToolValueType::String, .required = false },
+                { .name = "test", .description = "Exact test name.", .type = rose::tools::ToolValueType::String, .required = false },
+                { .name = "jobs", .description = "Parallel jobs.", .type = rose::tools::ToolValueType::Integer, .required = false }
+            };
+        }
+
+        [[nodiscard]]
+        const rose::tools::ToolDescriptor& descriptor() const noexcept override
+        {
+            return descriptor_;
+        }
+
+        [[nodiscard]]
+        rose::tools::ToolResult execute(const rose::tools::ToolRequest&) override
         {
             return {};
         }
@@ -528,6 +806,127 @@ int main()
         registry.registerTool(std::make_unique<PathDummyTool>("inspect_shortcut"));
         registry.registerTool(std::make_unique<PathDummyTool>("launch_program"));
         registry.registerTool(std::make_unique<DummyTool>("list_processes", false));
+        registry.registerTool(std::make_unique<CMakeBuildDummyTool>());
+        registry.registerTool(std::make_unique<CMakeConfigureDummyTool>());
+        registry.registerTool(std::make_unique<CMakeTestDummyTool>());
+
+        const auto sourceWindow =
+            rose::agent::CapabilityRoutingGuard::recoverDirectToolRequest(
+                "Read C:\\Docs\\large-source.cpp starting at line 2498 for 5 lines.",
+                registry,
+                {});
+        require(
+            sourceWindow.has_value()
+                && sourceWindow->toolId == "read_text_file"
+                && sourceWindow->arguments.at("start_line") == "2498"
+                && sourceWindow->arguments.at("line_count") == "5",
+            "deterministic text recovery must preserve explicit source-window line arguments");
+
+        const std::string trustedFailureMetadata =
+            "metadata_kind=source_diagnostic\n"
+            "producer_tool=build_cmake_project\n"
+            "operation_success=false\n"
+            "diagnostic_path=C:\\Rose\\src\\main.cpp\n"
+            "diagnostic_line=2498\n"
+            "diagnostic_column=17\n"
+            "diagnostic_severity=error\n"
+            "diagnostic_code=C2065\n"
+            "suggested_read_start_line=2468\n"
+            "suggested_read_line_count=80";
+
+        const auto diagnosticRead =
+            rose::agent::CapabilityRoutingGuard::recoverDiagnosticSourceReadRequest(
+                "Build C:\\Rose target Rose and fix any compiler errors.",
+                registry,
+                trustedFailureMetadata);
+        require(
+            diagnosticRead.has_value()
+                && diagnosticRead->toolId == "read_text_file"
+                && diagnosticRead->arguments.at("path") == "C:\\Rose\\src\\main.cpp"
+                && diagnosticRead->arguments.at("start_line") == "2468"
+                && diagnosticRead->arguments.at("line_count") == "80",
+            "explicit repair workflows must recover the Rose-owned diagnostic source window without reparsing raw compiler output");
+
+        const std::string trustedConfigureFailureMetadata =
+            "metadata_kind=source_diagnostic\n"
+            "producer_tool=reconfigure_cmake_project\n"
+            "operation_success=false\n"
+            "diagnostic_path=C:\\Rose\\CMakeLists.txt\n"
+            "diagnostic_line=17\n"
+            "diagnostic_column=0\n"
+            "diagnostic_severity=error\n"
+            "diagnostic_code=\n"
+            "suggested_read_start_line=1\n"
+            "suggested_read_line_count=47";
+
+        const auto configureDiagnosticRead =
+            rose::agent::CapabilityRoutingGuard::recoverDiagnosticSourceReadRequest(
+                "Reconfigure C:\\Rose and fix any CMake errors.",
+                registry,
+                trustedConfigureFailureMetadata);
+        require(
+            configureDiagnosticRead.has_value()
+                && configureDiagnosticRead->toolId == "read_text_file"
+                && configureDiagnosticRead->arguments.at("path") == "C:\\Rose\\CMakeLists.txt"
+                && configureDiagnosticRead->arguments.at("start_line") == "1"
+                && configureDiagnosticRead->arguments.at("line_count") == "47",
+            "failed CMake reconfiguration diagnostics must participate in the same grounded source-repair routing as configure/build/test failures");
+
+        const auto buildOnlyDiagnosticRead =
+            rose::agent::CapabilityRoutingGuard::recoverDiagnosticSourceReadRequest(
+                "Build C:\\Rose target Rose.",
+                registry,
+                trustedFailureMetadata);
+        require(!buildOnlyDiagnosticRead.has_value(),
+            "a plain build request must report failure instead of silently expanding into source diagnosis");
+
+        const auto untrustedProducerRead =
+            rose::agent::CapabilityRoutingGuard::recoverDiagnosticSourceReadRequest(
+                "Fix the compile error.",
+                registry,
+                "metadata_kind=source_diagnostic\n"
+                "producer_tool=launch_program\n"
+                "operation_success=false\n"
+                "diagnostic_path=C:\\Rose\\src\\main.cpp\n"
+                "suggested_read_start_line=2468\n"
+                "suggested_read_line_count=80");
+        require(!untrustedProducerRead.has_value(),
+            "only configure/build/test validation producers may create trusted diagnostic source recovery");
+
+        {
+            FixedResponseModelProvider provider{
+                "ACTION=TOOL\n"
+                "TOOL=read_text_file\n"
+                "ARG path=C:\\Rose\\src\\main.cpp\n"
+                "ARG start_line=1\n"
+                "ARG line_count=200\n"
+                "END\n"
+            };
+            rose::logging::Logger logger{
+                rose::logging::LoggerConfig{ .mode = rose::logging::LogMode::Silent }
+            };
+            rose::agent::ToolSelectionAgent agent{ provider, registry, logger };
+
+            const auto canonicalDiagnosticDecision = agent.decide(
+                "Build C:\\Rose target Rose and fix any compiler errors.",
+                {},
+                trustedFailureMetadata);
+            require(
+                canonicalDiagnosticDecision.action == AgentAction::InvokeTool
+                    && canonicalDiagnosticDecision.toolRequest.has_value()
+                    && canonicalDiagnosticDecision.toolRequest->toolId == "read_text_file"
+                    && canonicalDiagnosticDecision.toolRequest->arguments.at("start_line") == "2468"
+                    && canonicalDiagnosticDecision.toolRequest->arguments.at("line_count") == "80",
+                "model-selected diagnostic reads must be canonicalized to Rose-owned bounded source-window metadata");
+
+            const auto buildOnlyDecision = agent.decide(
+                "Build C:\\Rose target Rose.",
+                {},
+                trustedFailureMetadata);
+            require(
+                buildOnlyDecision.action == AgentAction::RespondNormally,
+                "model-selected diagnostic reads must be rejected when the original request did not authorize repair/debug follow-up");
+        }
 
         const auto pdf = rose::agent::CapabilityRoutingGuard::recoverDirectToolRequest(
             "Read C:\\Docs\\manual.pdf", registry, {});
@@ -669,6 +1068,117 @@ int main()
                 "List the running processes", registry, {});
         require(processListRecovery.has_value() && processListRecovery->toolId == "list_processes",
                 "running-process inventory requests should route to list_processes");
+
+        const auto configureExplanationRecovery =
+            rose::agent::CapabilityRoutingGuard::recoverDirectToolRequest(
+                "Show me how to reconfigure C:\\Projects\\Rose, but do not reconfigure it.",
+                registry,
+                {});
+        require(
+            !configureExplanationRecovery.has_value(),
+            "non-executing CMake reconfiguration explanations must not fall through to read_text_file on the project directory");
+
+        const std::array<std::string_view, 1> completedConfigure{ "reconfigure_cmake_project" };
+        const auto completedConfigureRecovery =
+            rose::agent::CapabilityRoutingGuard::recoverDirectToolRequest(
+                "Reconfigure C:\\Projects\\Rose.",
+                registry,
+                completedConfigure);
+        require(
+            !completedConfigureRecovery.has_value(),
+            "a completed reconfigure request must not be reinterpreted as read_text_file(path=<project-directory>)");
+
+        const auto buildExplanationRecovery =
+            rose::agent::CapabilityRoutingGuard::recoverDirectToolRequest(
+                "Show me how to build C:\\Projects\\Rose, but do not build it.",
+                registry,
+                {});
+        require(
+            !buildExplanationRecovery.has_value(),
+            "non-executing build explanations must not fall through to read_text_file on the project directory");
+
+        const std::array<std::string_view, 1> completedBuild{ "build_cmake_project" };
+        const auto completedBuildRecovery =
+            rose::agent::CapabilityRoutingGuard::recoverDirectToolRequest(
+                "Build C:\\Projects\\Rose target Rose in Debug with 8 jobs.",
+                registry,
+                completedBuild);
+        require(
+            !completedBuildRecovery.has_value(),
+            "a completed build request must not be reinterpreted as read_text_file(path=<project-directory>)");
+
+
+        require(
+            rose::agent::CapabilityRoutingGuard::explicitCMakeTestExecutionIntent(
+                "Run all tests in C:\\Projects\\Rose in Debug with 8 jobs."),
+            "run-all-tests requests must be recognized as explicit CTest execution intent");
+
+        require(
+            rose::agent::CapabilityRoutingGuard::explicitCMakeTestExecutionIntent(
+                "Run test RoseTextMutationToolsTest in C:\\Projects\\Rose Debug with 4 jobs."),
+            "run-one-test requests must be recognized as explicit CTest execution intent");
+
+        require(
+            !rose::agent::CapabilityRoutingGuard::explicitCMakeTestExecutionIntent(
+                "Show me how to run tests in C:\\Projects\\Rose, but do not run tests."),
+            "CTest explanation requests must remain non-executing");
+
+        require(
+            !rose::agent::CapabilityRoutingGuard::explicitCMakeTestExecutionIntent(
+                "Should I run all tests in C:\\Projects\\Rose?"),
+            "CTest advice questions must remain non-executing");
+
+        CTestRecoveryFixture ctestFixture;
+        const std::string quotedCTestPath =
+            "\"" + ctestFixture.requestPath() + "\"";
+
+        const auto allTestsRecovery =
+            rose::agent::CapabilityRoutingGuard::recoverDirectToolRequest(
+                "Run all tests in " + quotedCTestPath + " in Debug with 8 jobs.",
+                registry,
+                {});
+        require(
+            allTestsRecovery.has_value()
+                && allTestsRecovery->toolId == "run_cmake_tests",
+            "run-all-tests must recover to run_cmake_tests when the configured project is grounded");
+        require(
+            allTestsRecovery->arguments.at("configuration") == "Debug"
+                && allTestsRecovery->arguments.at("jobs") == "8"
+                && !allTestsRecovery->arguments.contains("test"),
+            "run-all-tests recovery must preserve configuration/jobs and omit an exact-test filter");
+
+        const auto oneTestRecovery =
+            rose::agent::CapabilityRoutingGuard::recoverDirectToolRequest(
+                "Run test RoseTextMutationToolsTest in " + quotedCTestPath
+                    + " Debug with 4 jobs.",
+                registry,
+                {});
+        require(
+            oneTestRecovery.has_value()
+                && oneTestRecovery->toolId == "run_cmake_tests"
+                && oneTestRecovery->arguments.at("test") == "RoseTextMutationToolsTest"
+                && oneTestRecovery->arguments.at("configuration") == "Debug"
+                && oneTestRecovery->arguments.at("jobs") == "4",
+            "run-one-test recovery must preserve the exact registered test/configuration/jobs");
+
+        const auto testExplanationRecovery =
+            rose::agent::CapabilityRoutingGuard::recoverDirectToolRequest(
+                "Show me how to run tests in C:\\Projects\\Rose, but do not run tests.",
+                registry,
+                {});
+        require(
+            !testExplanationRecovery.has_value(),
+            "non-executing test explanations must not fall through to read_text_file on the project directory");
+
+        const std::array<std::string_view, 1> completedTests{ "run_cmake_tests" };
+        const auto completedTestRecovery =
+            rose::agent::CapabilityRoutingGuard::recoverDirectToolRequest(
+                "Run tests in C:\\Projects\\Rose.",
+                registry,
+                completedTests);
+        require(
+            !completedTestRecovery.has_value(),
+            "a completed test request must not be reinterpreted as read_text_file(path=<project-directory>)");
     }
 
 
@@ -991,6 +1501,279 @@ int main()
     {
         FixedResponseModelProvider provider{
             "ACTION=TOOL\n"
+            "TOOL=edit_text_file\n"
+            "ARG path=C:\\Docs\\sample.cpp\n"
+            "ARG operation=replace_text\n"
+            "ARG find_text=oldValue\n"
+            "ARG replacement_text=newValue\n"
+            "END\n"
+        };
+
+        rose::tools::ToolRegistry registry;
+        registry.registerTool(std::make_unique<TextMutationDummyTool>("edit_text_file"));
+        rose::logging::Logger logger{
+            rose::logging::LoggerConfig{ .mode = rose::logging::LogMode::Silent }
+        };
+        rose::agent::ToolSelectionAgent agent{ provider, registry, logger };
+
+        const auto decision = agent.decide(
+            "Replace oldValue with newValue in C:\\Docs\\sample.cpp.");
+
+        require(
+            decision.action == AgentAction::InvokeTool
+                && decision.toolRequest.has_value()
+                && decision.toolRequest->toolId == "edit_text_file",
+            "explicit grounded text mutation should remain a tool request");
+    }
+
+
+    {
+        FixedResponseModelProvider provider{
+            "ACTION=TOOL\n"
+            "TOOL=edit_text_file\n"
+            "ARG path=C:\\Docs\\sample.cpp\n"
+            "ARG operation=replace_line_range\n"
+            "ARG start_line=41\n"
+            "ARG line_count=1\n"
+            "ARG expected_text=\n"
+            "ARG replacement_text=\\s\\sreturn 0;\n"
+            "END\n"
+        };
+
+        rose::tools::ToolRegistry registry;
+        registry.registerTool(std::make_unique<TextMutationDummyTool>("edit_text_file"));
+        rose::logging::Logger logger{
+            rose::logging::LoggerConfig{ .mode = rose::logging::LogMode::Silent }
+        };
+        rose::agent::ToolSelectionAgent agent{ provider, registry, logger };
+
+        const auto decision = agent.decide(
+            "Replace line 41 in C:\\Docs\\sample.cpp with return 0;.");
+
+        require(
+            decision.action == AgentAction::InvokeTool
+                && decision.toolRequest.has_value()
+                && decision.toolRequest->toolId == "edit_text_file",
+            "replace_line_range should remain a grounded explicit text mutation");
+        require(
+            decision.toolRequest->arguments.at("expected_text").empty(),
+            "the control protocol must preserve an explicitly empty optional preimage");
+        require(
+            decision.toolRequest->arguments.at("replacement_text")
+                == "\\s\\sreturn 0;",
+            "the control protocol must preserve escaped edge whitespace for the tool adapter");
+    }
+
+
+    {
+        FixedResponseModelProvider provider{
+            "ACTION=TOOL\n"
+            "TOOL=edit_text_file\n"
+            "ARG path=\n"
+            "ARG operation=replace_text\n"
+            "ARG find_text=oldValue\n"
+            "ARG replacement_text=newValue\n"
+            "END\n"
+        };
+
+        rose::tools::ToolRegistry registry;
+        registry.registerTool(std::make_unique<TextMutationDummyTool>("edit_text_file"));
+        rose::logging::Logger logger{
+            rose::logging::LoggerConfig{ .mode = rose::logging::LogMode::Silent }
+        };
+        rose::agent::ToolSelectionAgent agent{ provider, registry, logger };
+
+        const auto decision = agent.decide(
+            "Replace oldValue with newValue in C:\\Docs\\sample.cpp.");
+
+        require(
+            decision.action == AgentAction::RespondNormally
+                && !decision.toolRequest.has_value(),
+            "allowing empty optional ARG values must not allow required tool arguments to be empty");
+    }
+
+
+    {
+        FixedResponseModelProvider provider{
+            "ACTION=TOOL\n"
+            "TOOL=edit_text_file\n"
+            "ARG path=C:\\Users\\Username\\Documents\\sample.cpp\n"
+            "ARG operation=replace_text\n"
+            "ARG find_text=oldValue\n"
+            "ARG replacement_text=newValue\n"
+            "END\n"
+        };
+
+        rose::tools::ToolRegistry registry;
+        registry.registerTool(std::make_unique<TextMutationDummyTool>("edit_text_file"));
+        rose::logging::Logger logger{
+            rose::logging::LoggerConfig{ .mode = rose::logging::LogMode::Silent }
+        };
+        rose::agent::ToolSelectionAgent agent{ provider, registry, logger };
+
+        const auto decision = agent.decide(
+            "Replace oldValue with newValue in sample.cpp.");
+
+        require(
+            decision.action == AgentAction::RespondNormally
+                && !decision.toolRequest.has_value(),
+            "text mutation must reject a model-invented absolute file path");
+    }
+
+
+    {
+        FixedResponseModelProvider provider{
+            "ACTION=TOOL\n"
+            "TOOL=edit_text_file\n"
+            "ARG path=C:\\Docs\\sample.cpp\n"
+            "ARG operation=replace_text\n"
+            "ARG find_text=oldValue\n"
+            "ARG replacement_text=newValue\n"
+            "END\n"
+        };
+
+        rose::tools::ToolRegistry registry;
+        registry.registerTool(std::make_unique<TextMutationDummyTool>("edit_text_file"));
+        rose::logging::Logger logger{
+            rose::logging::LoggerConfig{ .mode = rose::logging::LogMode::Silent }
+        };
+        rose::agent::ToolSelectionAgent agent{ provider, registry, logger };
+
+        const auto decision = agent.decide(
+            "Summarize C:\\Docs\\sample.cpp and tell me what it does.");
+
+        require(
+            decision.action == AgentAction::RespondNormally
+                && !decision.toolRequest.has_value(),
+            "read-only source requests must never be upgraded into a text mutation");
+    }
+
+
+    {
+        FixedResponseModelProvider provider{
+            "ACTION=TOOL\n"
+            "TOOL=edit_text_file\n"
+            "ARG path=C:\\Docs\\sample.cpp\n"
+            "ARG operation=replace_text\n"
+            "ARG find_text=oldValue\n"
+            "ARG replacement_text=newValue\n"
+            "END\n"
+        };
+
+        rose::tools::ToolRegistry registry;
+        registry.registerTool(std::make_unique<TextMutationDummyTool>("edit_text_file"));
+        rose::logging::Logger logger{
+            rose::logging::LoggerConfig{ .mode = rose::logging::LogMode::Silent }
+        };
+        rose::agent::ToolSelectionAgent agent{ provider, registry, logger };
+
+        const auto decision = agent.decide(
+            "Show me how to edit C:\\Docs\\sample.cpp to replace oldValue with newValue, but do not edit it.");
+
+        require(
+            decision.action == AgentAction::RespondNormally
+                && !decision.toolRequest.has_value(),
+            "explicit no-edit wording must override text mutation verbs");
+    }
+
+
+    {
+        FixedResponseModelProvider provider{
+            "ACTION=TOOL\n"
+            "TOOL=edit_text_file\n"
+            "ARG path=sample.cpp\n"
+            "ARG operation=replace_text\n"
+            "ARG find_text=oldValue\n"
+            "ARG replacement_text=newValue\n"
+            "END\n"
+        };
+
+        rose::tools::ToolRegistry registry;
+        registry.registerTool(std::make_unique<TextMutationDummyTool>("edit_text_file"));
+        rose::logging::Logger logger{
+            rose::logging::LoggerConfig{ .mode = rose::logging::LogMode::Silent }
+        };
+        rose::agent::ToolSelectionAgent agent{ provider, registry, logger };
+
+        const std::string context =
+            "<rose_project_file_resolutions>\n"
+            "source=active_project_approved_roots\n"
+            "<rose_project_file_resolution>\n"
+            "requested=sample.cpp\n"
+            "status=unique\n"
+            "matches=1\n"
+            "absolute_path=C:\\Approved\\sample.cpp\n"
+            "</rose_project_file_resolution>\n"
+            "</rose_project_file_resolutions>";
+
+        const auto decision = agent.decide(
+            "Replace oldValue with newValue in sample.cpp.",
+            context);
+
+        require(
+            decision.action == AgentAction::InvokeTool
+                && decision.toolRequest.has_value()
+                && decision.toolRequest->arguments.at("path")
+                    == "C:\\Approved\\sample.cpp",
+            "text mutation should accept only Rose-owned unique Project filename resolution");
+    }
+
+
+    {
+        FixedResponseModelProvider provider{
+            "ACTION=TOOL\n"
+            "TOOL=create_text_file\n"
+            "ARG path=C:\\Docs\\notes.md\n"
+            "ARG content=Hello\n"
+            "END\n"
+        };
+
+        rose::tools::ToolRegistry registry;
+        registry.registerTool(std::make_unique<TextMutationDummyTool>("create_text_file"));
+        rose::logging::Logger logger{
+            rose::logging::LoggerConfig{ .mode = rose::logging::LogMode::Silent }
+        };
+        rose::agent::ToolSelectionAgent agent{ provider, registry, logger };
+
+        const auto decision = agent.decide(
+            "Create a new text file at C:\\Docs\\notes.md containing Hello.");
+
+        require(
+            decision.action == AgentAction::InvokeTool
+                && decision.toolRequest.has_value(),
+            "explicit grounded text creation should remain a tool request");
+    }
+
+
+    {
+        FixedResponseModelProvider provider{
+            "ACTION=TOOL\n"
+            "TOOL=create_text_file\n"
+            "ARG path=C:\\Temp\\invented.txt\n"
+            "ARG content=Hello\n"
+            "END\n"
+        };
+
+        rose::tools::ToolRegistry registry;
+        registry.registerTool(std::make_unique<TextMutationDummyTool>("create_text_file"));
+        rose::logging::Logger logger{
+            rose::logging::LoggerConfig{ .mode = rose::logging::LogMode::Silent }
+        };
+        rose::agent::ToolSelectionAgent agent{ provider, registry, logger };
+
+        const auto decision = agent.decide(
+            "Create a new text file for me containing Hello.");
+
+        require(
+            decision.action == AgentAction::RespondNormally
+                && !decision.toolRequest.has_value(),
+            "create_text_file must reject a model-invented destination path");
+    }
+
+
+    {
+        FixedResponseModelProvider provider{
+            "ACTION=TOOL\n"
             "TOOL=edit_office_document\n"
             "ARG path=C:\\Docs\\Budget.xlsx\n"
             "ARG operation=set_excel_cell\n"
@@ -1133,6 +1916,271 @@ int main()
         require(decision.toolRequest.has_value() && decision.toolRequest->toolId == "extract_pdf_pages",
             "grounded PDF extraction should be accepted");
     }
+
+    {
+        FixedResponseModelProvider provider{
+            "ACTION=TOOL\n"
+            "TOOL=reconfigure_cmake_project\n"
+            "ARG source_path=C:\\Projects\\Rose\n"
+            "END\n"
+        };
+
+        rose::tools::ToolRegistry registry;
+        registry.registerTool(std::make_unique<CMakeConfigureDummyTool>());
+        rose::logging::Logger logger{
+            rose::logging::LoggerConfig{ .mode = rose::logging::LogMode::Silent }
+        };
+        rose::agent::ToolSelectionAgent agent{ provider, registry, logger };
+
+        const auto decision = agent.decide(
+            "Reconfigure C:\\Projects\\Rose now.");
+        require(
+            decision.action == AgentAction::InvokeTool
+                && decision.toolRequest.has_value()
+                && decision.toolRequest->toolId == "reconfigure_cmake_project"
+                && decision.toolRequest->arguments.at("source_path") == "C:\\Projects\\Rose",
+            "an explicit grounded existing-tree CMake reconfiguration should be routable");
+    }
+
+    {
+        FixedResponseModelProvider provider{
+            "ACTION=TOOL\n"
+            "TOOL=reconfigure_cmake_project\n"
+            "ARG source_path=C:\\Other\\Project\n"
+            "END\n"
+        };
+
+        rose::tools::ToolRegistry registry;
+        registry.registerTool(std::make_unique<CMakeConfigureDummyTool>());
+        rose::logging::Logger logger{
+            rose::logging::LoggerConfig{ .mode = rose::logging::LogMode::Silent }
+        };
+        rose::agent::ToolSelectionAgent agent{ provider, registry, logger };
+
+        const auto decision = agent.decide(
+            "Reconfigure C:\\Projects\\Rose now.");
+        require(
+            decision.action == AgentAction::RespondNormally,
+            "reconfigure_cmake_project must reject a model-invented source directory");
+    }
+
+    {
+        FixedResponseModelProvider provider{
+            "ACTION=TOOL\n"
+            "TOOL=reconfigure_cmake_project\n"
+            "ARG source_path=C:\\Projects\\Rose\n"
+            "END\n"
+        };
+
+        rose::tools::ToolRegistry registry;
+        registry.registerTool(std::make_unique<CMakeConfigureDummyTool>());
+        rose::logging::Logger logger{
+            rose::logging::LoggerConfig{ .mode = rose::logging::LogMode::Silent }
+        };
+        rose::agent::ToolSelectionAgent agent{ provider, registry, logger };
+
+        const auto decision = agent.decide(
+            "Show me how to reconfigure C:\\Projects\\Rose, but do not reconfigure it.");
+        require(
+            decision.action == AgentAction::RespondNormally,
+            "CMake reconfiguration explanations and explicit no-configure requests must never execute CMake");
+    }
+
+
+    {
+        FixedResponseModelProvider provider{
+            "ACTION=TOOL\n"
+            "TOOL=build_cmake_project\n"
+            "ARG source_path=C:\\Projects\\Rose\n"
+            "ARG configuration=Release\n"
+            "ARG target=install\n"
+            "ARG jobs=32\n"
+            "END\n"
+        };
+
+        rose::tools::ToolRegistry registry;
+        registry.registerTool(std::make_unique<CMakeBuildDummyTool>());
+
+        rose::logging::Logger logger{
+            rose::logging::LoggerConfig{ .mode = rose::logging::LogMode::Silent }
+        };
+
+        rose::agent::ToolSelectionAgent agent{ provider, registry, logger };
+        const auto decision = agent.decide(
+            "Build C:\\Projects\\Rose now.");
+
+        require(
+            decision.action == AgentAction::InvokeTool
+                && decision.toolRequest.has_value()
+                && decision.toolRequest->toolId == "build_cmake_project",
+            "an explicit grounded CMake build should be routable");
+        require(
+            decision.toolRequest->arguments.at("source_path") == "C:\\Projects\\Rose",
+            "CMake build must preserve the grounded source path");
+        require(
+            !decision.toolRequest->arguments.contains("configuration")
+                && !decision.toolRequest->arguments.contains("target")
+                && !decision.toolRequest->arguments.contains("jobs"),
+            "model-invented CMake build options must be discarded");
+    }
+
+
+    {
+        FixedResponseModelProvider provider{
+            "ACTION=TOOL\n"
+            "TOOL=build_cmake_project\n"
+            "ARG source_path=C:\\Other\\Project\n"
+            "END\n"
+        };
+
+        rose::tools::ToolRegistry registry;
+        registry.registerTool(std::make_unique<CMakeBuildDummyTool>());
+        rose::logging::Logger logger{
+            rose::logging::LoggerConfig{ .mode = rose::logging::LogMode::Silent }
+        };
+        rose::agent::ToolSelectionAgent agent{ provider, registry, logger };
+
+        const auto decision = agent.decide(
+            "Build C:\\Projects\\Rose now.");
+        require(
+            decision.action == AgentAction::RespondNormally,
+            "build_cmake_project must reject a model-invented source directory");
+    }
+
+
+    {
+        FixedResponseModelProvider provider{
+            "ACTION=TOOL\n"
+            "TOOL=build_cmake_project\n"
+            "ARG source_path=C:\\Projects\\Rose\n"
+            "END\n"
+        };
+
+        rose::tools::ToolRegistry registry;
+        registry.registerTool(std::make_unique<CMakeBuildDummyTool>());
+        rose::logging::Logger logger{
+            rose::logging::LoggerConfig{ .mode = rose::logging::LogMode::Silent }
+        };
+        rose::agent::ToolSelectionAgent agent{ provider, registry, logger };
+
+        const auto decision = agent.decide(
+            "Show me how to build C:\\Projects\\Rose, but do not build it.");
+        require(
+            decision.action == AgentAction::RespondNormally,
+            "build explanations and explicit no-build requests must never execute the project");
+    }
+
+
+    {
+        FixedResponseModelProvider provider{
+            "ACTION=TOOL\n"
+            "TOOL=run_cmake_tests\n"
+            "ARG source_path=C:\\Projects\\Rose\n"
+            "ARG configuration=Release\n"
+            "ARG test=InventedTest\n"
+            "ARG jobs=32\n"
+            "END\n"
+        };
+
+        rose::tools::ToolRegistry registry;
+        registry.registerTool(std::make_unique<CMakeTestDummyTool>());
+        rose::logging::Logger logger{
+            rose::logging::LoggerConfig{ .mode = rose::logging::LogMode::Silent }
+        };
+        rose::agent::ToolSelectionAgent agent{ provider, registry, logger };
+
+        const auto decision = agent.decide(
+            "Run tests in C:\\Projects\\Rose now.");
+        require(
+            decision.action == AgentAction::InvokeTool
+                && decision.toolRequest.has_value()
+                && decision.toolRequest->toolId == "run_cmake_tests",
+            "an explicit grounded CTest run should be routable");
+        require(
+            decision.toolRequest->arguments.at("source_path") == "C:\\Projects\\Rose",
+            "CTest must preserve the grounded source path");
+        require(
+            !decision.toolRequest->arguments.contains("configuration")
+                && !decision.toolRequest->arguments.contains("test")
+                && !decision.toolRequest->arguments.contains("jobs"),
+            "model-invented CTest options must be discarded");
+    }
+
+    {
+        FixedResponseModelProvider provider{
+            "ACTION=TOOL\n"
+            "TOOL=run_cmake_tests\n"
+            "ARG source_path=C:\\Projects\\Rose\n"
+            "ARG configuration=Debug\n"
+            "ARG test=RoseTextMutationToolsTest\n"
+            "ARG jobs=4\n"
+            "END\n"
+        };
+
+        rose::tools::ToolRegistry registry;
+        registry.registerTool(std::make_unique<CMakeTestDummyTool>());
+        rose::logging::Logger logger{
+            rose::logging::LoggerConfig{ .mode = rose::logging::LogMode::Silent }
+        };
+        rose::agent::ToolSelectionAgent agent{ provider, registry, logger };
+
+        const auto decision = agent.decide(
+            "Run test RoseTextMutationToolsTest in C:\\Projects\\Rose Debug with 4 jobs.");
+        require(
+            decision.action == AgentAction::InvokeTool
+                && decision.toolRequest.has_value(),
+            "grounded exact CTest filters should remain executable");
+        require(
+            decision.toolRequest->arguments.at("configuration") == "Debug"
+                && decision.toolRequest->arguments.at("test") == "RoseTextMutationToolsTest"
+                && decision.toolRequest->arguments.at("jobs") == "4",
+            "explicit CTest configuration/test/jobs must be preserved");
+    }
+
+    {
+        FixedResponseModelProvider provider{
+            "ACTION=TOOL\n"
+            "TOOL=run_cmake_tests\n"
+            "ARG source_path=C:\\Other\\Project\n"
+            "END\n"
+        };
+
+        rose::tools::ToolRegistry registry;
+        registry.registerTool(std::make_unique<CMakeTestDummyTool>());
+        rose::logging::Logger logger{
+            rose::logging::LoggerConfig{ .mode = rose::logging::LogMode::Silent }
+        };
+        rose::agent::ToolSelectionAgent agent{ provider, registry, logger };
+
+        const auto decision = agent.decide(
+            "Run tests in C:\\Projects\\Rose.");
+        require(
+            decision.action == AgentAction::RespondNormally,
+            "run_cmake_tests must reject a model-invented source directory");
+    }
+
+    {
+        FixedResponseModelProvider provider{
+            "ACTION=TOOL\n"
+            "TOOL=run_cmake_tests\n"
+            "ARG source_path=C:\\Projects\\Rose\n"
+            "END\n"
+        };
+
+        rose::tools::ToolRegistry registry;
+        registry.registerTool(std::make_unique<CMakeTestDummyTool>());
+        rose::logging::Logger logger{
+            rose::logging::LoggerConfig{ .mode = rose::logging::LogMode::Silent }
+        };
+        rose::agent::ToolSelectionAgent agent{ provider, registry, logger };
+
+        const auto decision = agent.decide(
+            "Show me how to run tests in C:\\Projects\\Rose, but do not run tests.");
+        require(
+            decision.action == AgentAction::RespondNormally,
+            "test explanations and explicit no-test requests must never execute CTest");
+    }
+
 
     std::cout
         << "Rose ToolSelectionAgent tests: PASS\n";

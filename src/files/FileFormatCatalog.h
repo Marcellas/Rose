@@ -53,6 +53,14 @@ namespace rose::files
     bool isPdfFile(
         const std::filesystem::path& path) noexcept;
 
+    // Returns true only for the plain-text/source families Rose intentionally
+    // recognizes as safe text documents. Executable/script families that have
+    // their own format classification do not become text merely because their
+    // bytes may be human-readable.
+    [[nodiscard]]
+    bool isTextSourceFile(
+        const std::filesystem::path& path) noexcept;
+
     [[nodiscard]]
     bool isZipArchiveFile(
         const std::filesystem::path& path) noexcept;

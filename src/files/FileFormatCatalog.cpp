@@ -10,19 +10,25 @@ namespace rose::files
     namespace
     {
         [[nodiscard]]
+        std::string lowerAscii(
+            std::string value)
+        {
+            std::transform(
+                value.begin(),
+                value.end(),
+                value.begin(),
+                [](const unsigned char character)
+                {
+                    return static_cast<char>(std::tolower(character));
+                });
+            return value;
+        }
+
+        [[nodiscard]]
         std::string lowerExtension(
             const std::filesystem::path& path)
         {
-            std::string extension = path.extension().string();
-            std::transform(
-                extension.begin(),
-                extension.end(),
-                extension.begin(),
-                [](const unsigned char value)
-                {
-                    return static_cast<char>(std::tolower(value));
-                });
-            return extension;
+            return lowerAscii(path.extension().string());
         }
 
         template<std::size_t Size>
@@ -32,6 +38,56 @@ namespace rose::files
             const std::array<std::string_view, Size>& values) noexcept
         {
             return std::find(values.begin(), values.end(), value) != values.end();
+        }
+
+        [[nodiscard]]
+        bool recognizedTextSource(
+            const std::filesystem::path& path) noexcept
+        {
+            // This catalog is deliberately narrower than Project Knowledge's
+            // UTF-8 reader. Project Knowledge may inspect human-readable scripts,
+            // while generic text mutation should not silently gain authority over
+            // shell/PowerShell/batch command files. Those can receive a dedicated
+            // execution-aware mutation policy later.
+            static constexpr std::array<std::string_view, 92> extensions{
+                ".txt", ".md", ".markdown", ".rst", ".adoc", ".csv", ".tsv",
+                ".log", ".json", ".jsonl", ".jsonc", ".xml", ".yaml", ".yml",
+                ".ini", ".cfg", ".conf", ".toml",
+
+                // C/C++ and Visual Studio/native project files.
+                ".c", ".cc", ".cpp", ".cxx", ".h", ".hh", ".hpp", ".hxx",
+                ".inl", ".ipp", ".ixx", ".cppm", ".rc", ".def", ".idl",
+                ".natvis", ".sln", ".slnx", ".vcxproj", ".props", ".targets",
+                ".filters", ".manifest", ".resx",
+
+                // Common source languages. These remain text mutations only; Rose
+                // does not execute them as a side effect of editing.
+                ".cs", ".csproj", ".fs", ".fsx", ".fsproj", ".vb", ".vbproj",
+                ".java", ".kt", ".kts", ".go", ".rs", ".swift", ".m", ".mm",
+                ".py", ".pyi", ".pyx", ".js", ".mjs", ".cjs", ".ts", ".tsx",
+                ".jsx", ".lua", ".rb", ".php", ".pl", ".pm", ".r", ".sql",
+                ".dart", ".scala", ".groovy", ".gvy", ".gradle",
+
+                // Build/web/schema formats that are declarative text rather than
+                // direct command-shell scripts in Rose's current tool model.
+                ".cmake", ".make", ".mk", ".html", ".htm", ".css", ".scss",
+                ".sass", ".less", ".vue", ".svelte", ".graphql", ".gql", ".proto"
+            };
+
+            const std::string extension = lowerExtension(path);
+            if (!extension.empty() && in(extension, extensions))
+            {
+                return true;
+            }
+
+            const std::string filename = lowerAscii(path.filename().string());
+            static constexpr std::array<std::string_view, 11> exactNames{
+                "cmakelists.txt", "makefile", "gnumakefile", "dockerfile",
+                "readme", "license", "copying", ".editorconfig", ".gitignore",
+                ".gitattributes", ".clang-format"
+            };
+
+            return in(filename, exactNames);
         }
     }
 
@@ -133,6 +189,10 @@ namespace rose::files
         {
             return { FileFormatKind::Executable, "executable/program", false, false, false };
         }
+        if (recognizedTextSource(path))
+        {
+            return { FileFormatKind::TextSource, "text/source", true, true, true };
+        }
 
         return {};
     }
@@ -164,6 +224,12 @@ namespace rose::files
         const std::filesystem::path& path) noexcept
     {
         return classifyFileFormat(path).kind == FileFormatKind::Pdf;
+    }
+
+    bool isTextSourceFile(
+        const std::filesystem::path& path) noexcept
+    {
+        return classifyFileFormat(path).kind == FileFormatKind::TextSource;
     }
 
     bool isZipArchiveFile(

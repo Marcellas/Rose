@@ -19,6 +19,12 @@ namespace rose::tools
         // inside Qwen's current 8192-token context. ReadFileTool still enforces its
         // own larger hard safety limit before this adapter narrows the returned text.
         std::size_t maximumObservationBytes{ 8u * 1024u };
+
+        // A configure/compiler/test diagnostic normally needs only a small source window.
+        // Keep model-selected ranges bounded even though the lower-level reader
+        // may scan several MiB to reach that window.
+        std::size_t defaultLineCount{ 80 };
+        std::size_t maximumLineCount{ 200 };
     };
 
 

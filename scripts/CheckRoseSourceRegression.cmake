@@ -1030,3 +1030,452 @@ rose_require_source_text(
     "PDF mutation grounding and intent guard")
 
 message(STATUS "Rose Batch 36 PDF mutation regression contract: PASS")
+
+# Batch 38 controlled UTF-8 text/source mutation. Exact-file reading and writing
+# remain separate; replace/remove fail closed on missing or ambiguous matches and
+# the service stages a fully written sibling before replacing the original.
+rose_require_source_text(
+    "src/files/TextFileMutationService.cpp"
+    "uniqueOccurrenceOffset"
+    "unique exact-match text mutation precondition")
+
+rose_require_source_text(
+    "src/files/TextFileMutationService.cpp"
+    "ReplaceFileW"
+    "transactional Windows text replacement boundary")
+
+rose_require_source_text(
+    "src/tools/EditTextFileTool.cpp"
+    ".risk = ToolRisk::LocalWrite"
+    "text mutation local-write classification")
+
+rose_require_source_text(
+    "src/tools/EditTextFileTool.cpp"
+    "replace_text, append_text, remove_text"
+    "text replace/append/remove mutation surface")
+
+rose_require_source_text(
+    "src/agent/ToolSelectionAgent.cpp"
+    "Rejected ungrounded or non-explicit text mutation request."
+    "text mutation path and intent grounding")
+
+rose_require_source_text(
+    "src/main.cpp"
+    "EditTextFileTool"
+    "text mutation tool registration")
+
+message(STATUS "Rose Batch 38 text mutation regression contract: PASS")
+
+# Batch 39 controlled CMake build execution. Source mutation and execution stay
+# separate permission boundaries; builds use cmake.exe directly, require an
+# existing source-matched build tree, capture bounded diagnostics, and remain
+# confirmation-gated because project build rules may execute code.
+rose_require_source_text(
+    "src/development/BoundedProcessRunner.cpp"
+    "JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE"
+    "bounded Windows build-process lifetime")
+
+rose_require_source_text(
+    "src/development/ConfiguredCMakeProject.cpp"
+    "CMAKE_HOME_DIRECTORY:INTERNAL="
+    "source-matched configured CMake build tree")
+
+rose_require_source_text(
+    "src/tools/BuildCMakeProjectTool.cpp"
+    ".risk = ToolRisk::ExternalEffect"
+    "CMake build external-effect classification")
+
+rose_require_source_text(
+    "src/tools/BuildCMakeProjectTool.cpp"
+    "ToolResponseMode::RequiresModelSynthesis"
+    "compiler diagnostics returned to the coding agent")
+
+rose_require_source_text(
+    "src/agent/ToolSelectionAgent.cpp"
+    "Rejected ungrounded or non-explicit CMake build request."
+    "CMake build source and intent grounding")
+
+rose_require_source_text(
+    "src/main.cpp"
+    ".maximumToolExecutions ="
+    "bounded one-repair coding workflow ceiling")
+
+rose_require_source_text(
+    "src/agent/AgentLoop.cpp"
+    "Allowed repeated developer validation after an intervening local mutation."
+    "bounded post-mutation developer validation retry")
+
+message(STATUS "Rose Batch 39 controlled CMake build regression contract: PASS")
+
+# Batch 39 hotfix: deterministic recovery must preserve explicit build options
+# and must never reinterpret a CMake project directory as read_text_file after
+# a build request or a non-executing build explanation.
+rose_require_source_text(
+    "src/agent/CapabilityRoutingGuard.cpp"
+    "request.arguments.emplace(\"target\", *target)"
+    "deterministic CMake recovery preserves explicit target")
+
+rose_require_source_text(
+    "src/agent/CapabilityRoutingGuard.cpp"
+    "request.arguments.emplace(\"jobs\", *jobs)"
+    "deterministic CMake recovery preserves explicit job count")
+
+rose_require_source_text(
+    "src/agent/CapabilityRoutingGuard.cpp"
+    "suppressDevelopmentPathFileRecovery"
+    "CMake project directories cannot fall through to text-file recovery")
+
+message(STATUS "Rose Batch 39 CMake recovery hotfix regression contract: PASS")
+
+
+# Batch 40 controlled CTest execution. Build and test execution share one private
+# bounded process primitive, while ctest remains a separate confirmation-gated
+# capability so compilation success is never silently equated with test success.
+rose_require_source_text(
+    "src/development/BoundedProcessRunner.cpp"
+    "CreateProcessW"
+    "shared shell-free bounded developer process execution")
+
+rose_require_source_text(
+    "src/development/CMakeTestService.cpp"
+    "CTestTestfile.cmake"
+    "registered-test-only configured build boundary")
+
+rose_require_source_text(
+    "src/development/CMakeTestService.cpp"
+    "--no-tests=error"
+    "zero matched tests fail closed")
+
+rose_require_source_text(
+    "src/tools/RunCMakeTestsTool.cpp"
+    ".risk = ToolRisk::ExternalEffect"
+    "CTest execution external-effect classification")
+
+rose_require_source_text(
+    "src/tools/RunCMakeTestsTool.cpp"
+    "ToolResponseMode::RequiresModelSynthesis"
+    "test diagnostics returned to the coding agent")
+
+rose_require_source_text(
+    "src/agent/ToolSelectionAgent.cpp"
+    "Rejected ungrounded or non-explicit CTest request."
+    "CTest source and execution-intent grounding")
+
+rose_require_source_text(
+    "src/main.cpp"
+    ".maximumToolExecutions = 7"
+    "bounded build-test-repair coding workflow ceiling")
+
+rose_require_source_text(
+    "CMakeLists.txt"
+    "ROSE_CTEST_TARGETS"
+    "Rose test targets registered with CTest")
+
+message(STATUS "Rose Batch 40 controlled CTest regression contract: PASS")
+
+
+# Batch 40 hotfix: CTest execution intent is classified once and shared by both
+# model-selected validation and deterministic direct-request recovery. This
+# specifically protects "Run all tests ..." and "Run test <name> ..." from
+# falling back to conversational promises with no pending action.
+rose_require_source_text(
+    "src/agent/CapabilityRoutingGuard.cpp"
+    "lowerUser.starts_with(\"run all test\")"
+    "run-all-tests execution intent")
+
+rose_require_source_text(
+    "src/agent/ToolSelectionAgent.cpp"
+    "CapabilityRoutingGuard::explicitCMakeTestExecutionIntent"
+    "shared CTest execution-intent validation")
+
+rose_require_source_text(
+    "src/agent/ToolSelectionAgent_test.cpp"
+    "run-all-tests requests must be recognized as explicit CTest execution intent"
+    "CTest recovery regression test")
+
+message(STATUS "Rose Batch 40 CTest routing hotfix regression contract: PASS")
+
+
+# Batch 41 diagnostic source windows. read_text_file remains exact-file and
+# confirmation-gated, but can now inspect bounded line windows around compiler or
+# CTest diagnostics even when the relevant source is beyond the ordinary prefix.
+rose_require_source_text(
+    "src/tools/ReadTextFileRegisteredTool.cpp"
+    "name = \"start_line\""
+    "diagnostic text-read start-line parameter")
+
+rose_require_source_text(
+    "src/tools/ReadTextFileRegisteredTool.cpp"
+    "line_count requires start_line"
+    "bounded source-window argument relationship")
+
+rose_require_source_text(
+    "src/tools/ReadFileTool.h"
+    "maximumTextRangeScanBytes{ 4u * 1024u * 1024u }"
+    "bounded source-window scan ceiling")
+
+rose_require_source_text(
+    "src/agent/CapabilityRoutingGuard.cpp"
+    "request.arguments.emplace("
+    "deterministic source-window argument recovery")
+
+rose_require_source_text(
+    "src/agent/ToolSelectionAgent.cpp"
+    "prefer a narrow one-based start_line plus line_count window"
+    "coding-agent diagnostic source-window guidance")
+
+rose_require_source_text(
+    "src/agent/ToolObservation.cpp"
+    "reconfigure_cmake_project, build_cmake_project, or run_cmake_tests"
+    "post-mutation configure/build/test retry guidance")
+
+message(STATUS "Rose Batch 41 diagnostic source-window regression contract: PASS")
+
+
+# Batch 42 structured developer diagnostics. Build/test output remains bounded
+# evidence, while Rose separately derives one project-contained source location
+# into Rose-owned trusted metadata. Explicit repair/debug workflows may recover a
+# narrow read_text_file window from that metadata; plain build/test requests do
+# not silently expand into source inspection.
+rose_require_source_text(
+    "src/development/DiagnosticExtraction.cpp"
+    "groundedProjectFile"
+    "project-contained source diagnostic grounding")
+
+rose_require_source_text(
+    "src/development/DiagnosticExtraction.cpp"
+    "metadata_kind=source_diagnostic"
+    "Rose-owned structured diagnostic metadata")
+
+rose_require_source_text(
+    "src/tools/ToolTypes.h"
+    "trustedMetadata"
+    "trusted tool metadata channel separated from raw output")
+
+rose_require_source_text(
+    "src/agent/AgentLoop.h"
+    "latestTrustedToolMetadata"
+    "trusted diagnostic routing state kept outside ordinary transient context")
+
+rose_require_source_text(
+    "src/agent/CapabilityRoutingGuard.cpp"
+    "recoverDiagnosticSourceReadRequest"
+    "failed validation to source-window deterministic recovery")
+
+rose_require_source_text(
+    "src/agent/AgentLoop.cpp"
+    "diagnosticRead"
+    "bounded agent loop diagnostic follow-up integration")
+
+rose_require_source_text(
+    "src/agent/ToolSelectionAgent.cpp"
+    "authority from arbitrary raw configure/compiler/test output text."
+    "raw diagnostic output trust-boundary guidance")
+
+message(STATUS "Rose Batch 42 structured diagnostic routing regression contract: PASS")
+
+
+# Batch 43 patch-oriented source editing. Exact string replacement remains
+# available, while narrow coding repairs can now replace a bounded contiguous
+# source-line range only when the caller supplies the exact observed preimage.
+# The service normalizes CRLF/LF for comparison, preserves the file's line-ending
+# style, and keeps the existing transactional/concurrent-change protections.
+rose_require_source_text(
+    "src/files/TextFileMutationService.cpp"
+    "replace_line_range preimage mismatch"
+    "line-range source preimage verification")
+
+rose_require_source_text(
+    "src/files/TextFileMutationService.cpp"
+    "maximumLinePatchLines{ 200u }"
+    "bounded line-patch size")
+
+rose_require_source_text(
+    "src/tools/EditTextFileTool.cpp"
+    "operation == \"replace_line_range\""
+    "line-range mutation tool adapter")
+
+rose_require_source_text(
+    "src/tools/EditTextFileTool.cpp"
+    "case 's':"
+    "single-line control protocol edge-space escape")
+
+rose_require_source_text(
+    "src/agent/ToolSelectionAgent.cpp"
+    "expected_text is valid for one empty source line."
+    "empty optional preimage protocol support")
+
+rose_require_source_text(
+    "src/agent/ToolSelectionAgent.cpp"
+    "Model omitted or emptied a required tool argument"
+    "required tool arguments remain non-empty")
+
+message(STATUS "Rose Batch 43 patch-oriented source editing regression contract: PASS")
+
+
+# Batch 43 recovery-gate hotfix. Deterministic direct recovery is more specific
+# than the broad likelyToolBackedRequest heuristic and therefore must not be
+# suppressed when that heuristic misses a newly supported phrase. This is what
+# allows an explicit line mutation to recover its prerequisite source-window
+# read after the control model incorrectly chooses RESPOND.
+rose_require_source_text(
+    "src/agent/AgentLoop.cpp"
+    "Deterministic recovery is the stronger signal"
+    "direct deterministic recovery is not heuristic-gated")
+
+rose_require_source_text(
+    "src/agent/AgentLoop.cpp"
+    "|| directRequest.has_value()"
+    "recovered direct request participates in tool-backed fallback")
+
+message(STATUS "Rose Batch 43 recovery-gate hotfix regression contract: PASS")
+# Batch 44 numbered source provenance. Source observations carry per-line hashes
+# so a later narrow patch can be rebound to any observed contiguous subrange.
+rose_require_source_text(
+    "src/files/SourceWindowDigest.cpp"
+    "sourceWindowSha256FromLineDigests"
+    "per-line source provenance aggregation")
+
+rose_require_source_text(
+    "src/agent/SourceWindowBinding.cpp"
+    "expected_digest"
+    "Rose-owned observed-source preimage binding")
+
+message(STATUS "Rose Batch 44 numbered source provenance regression contract: PASS")
+# Batch 45 explicit repair planning. A grounded diagnostic may survive exactly one
+# matching source-window read, then a provenance-bound patch receives a reviewable
+# plan before the confirmation-gated mutation executes.
+rose_require_source_text(
+    "src/agent/SourceRepairPlan.cpp"
+    "Source repair plan:"
+    "reviewable source repair plan formatting")
+
+rose_require_source_text(
+    "src/agent/AgentLoop.cpp"
+    "Prepared a provenance-bound source repair plan before mutation."
+    "repair plan journal event before confirmation")
+
+rose_require_source_text(
+    "src/agent/AgentLoop.cpp"
+    "latestDiagnosticMetadata"
+    "grounded diagnostic lifetime across matching source read")
+
+message(STATUS "Rose Batch 45 unified repair planning regression contract: PASS")
+# Batch 46 deterministic post-repair revalidation. Rose retains the exact failed
+# build/test request that produced the grounded diagnostic and may replay that
+# request only after the provenance-bound repair succeeds. The replay remains
+# confirmation-gated and never reconstructs validation arguments from model text.
+rose_require_source_text(
+    "src/agent/RepairValidationReplay.cpp"
+    "failedValidationRequest = request"
+    "exact failed validation request retained for repair verification")
+
+rose_require_source_text(
+    "src/agent/RepairValidationReplay.cpp"
+    "plan.diagnostic->producerTool"
+    "repair diagnostic producer must match retained validation")
+
+rose_require_source_text(
+    "src/agent/AgentLoop.cpp"
+    "pendingRepairValidationRequest"
+    "post-repair validation recovered from Rose-owned state")
+
+rose_require_source_text(
+    "src/agent/AgentLoop.cpp"
+    "Deterministic post-repair validation replay proposed the exact failed configure/build/test request."
+    "repair validation replay journal evidence")
+
+message(STATUS "Rose Batch 46 deterministic repair revalidation regression contract: PASS")
+# Batch 47 repair outcome tracking. Applying a provenance-bound patch is not the
+# same as proving the repair. Rose correlates the exact post-repair validation
+# with the patch and records applied/succeeded/failed outcome events separately.
+rose_require_source_text(
+    "src/agent/RepairOutcomeTracker.cpp"
+    "patch_applied_pending_validation"
+    "source repair application remains explicitly unproven before validation")
+
+rose_require_source_text(
+    "src/agent/RepairOutcomeTracker.cpp"
+    "validation_succeeded"
+    "exact correlated validation can prove a tracked repair")
+
+rose_require_source_text(
+    "src/agent/RepairOutcomeTracker.cpp"
+    "validation_failed"
+    "failed correlated validation preserves unproven repair outcome")
+
+rose_require_source_text(
+    "src/agent/AgentLoop.cpp"
+    "AgentEventType::RepairApplied"
+    "repair application black-box event")
+
+rose_require_source_text(
+    "src/agent/AgentLoop.cpp"
+    "AgentEventType::RepairValidated"
+    "successful repair validation black-box event")
+
+rose_require_source_text(
+    "src/agent/AgentLoop.cpp"
+    "AgentEventType::RepairValidationFailed"
+    "failed repair validation black-box event")
+
+message(STATUS "Rose Batch 47 repair outcome tracking regression contract: PASS")
+# Batch 48 controlled CMake reconfiguration. Rose may refresh generation only
+# for an already-configured, source-matched <source>/build tree. The tool exposes
+# no generator/cache/toolchain/preset argument surface and remains confirmation-
+# gated because CMake configure scripts/dependency discovery may execute effects.
+rose_require_source_text(
+    "src/development/CMakeConfigureService.cpp"
+    "validateConfiguredCMakeProject(request.sourceDirectory)"
+    "reconfigure requires an existing source-matched CMake cache")
+
+rose_require_source_text(
+    "src/development/CMakeConfigureService.cpp"
+    [=[arguments.push_back(L"-S")]=]
+    "CMake reconfiguration invokes the exact source/build form directly")
+
+rose_require_source_text(
+    "src/tools/ReconfigureCMakeProjectTool.cpp"
+    ".risk = ToolRisk::ExternalEffect"
+    "CMake reconfiguration external-effect classification")
+
+rose_require_source_text(
+    "src/tools/ReconfigureCMakeProjectTool.cpp"
+    "reconfigure_cmake_project does not accept argument"
+    "CMake reconfiguration rejects arbitrary extra argument authority")
+
+rose_require_source_text(
+    "src/agent/ToolSelectionAgent.cpp"
+    "Rejected ungrounded or non-explicit CMake reconfigure request."
+    "CMake reconfiguration path and execution-intent grounding")
+
+rose_require_source_text(
+    "src/agent/CapabilityRoutingGuard.cpp"
+    ".toolId = \"reconfigure_cmake_project\""
+    "deterministic explicit CMake reconfiguration recovery")
+
+rose_require_source_text(
+    "src/agent/RepairValidationReplay.cpp"
+    "request.toolId == \"reconfigure_cmake_project\""
+    "CMake reconfiguration participates in provenance-bound repair validation")
+
+rose_require_source_text(
+    "src/main.cpp"
+    "ReconfigureCMakeProjectTool"
+    "CMake reconfiguration tool registration")
+
+message(STATUS "Rose Batch 48 controlled CMake reconfiguration regression contract: PASS")
+# Batch 48 runtime command guard hotfix. /exit must perform the same real local
+# shutdown as /quit, and unknown slash commands must never reach the model and
+# masquerade as completed application-side effects.
+rose_require_source_text(
+    "src/main.cpp"
+    [=[commandText == "/exit"]=]
+    "real /exit alias for local Rose shutdown")
+
+rose_require_source_text(
+    "src/main.cpp"
+    "Unknown Rose command. Use /tools"
+    "unknown slash commands fail closed before model inference")
+
+message(STATUS "Rose Batch 48 runtime command-guard hotfix regression contract: PASS")

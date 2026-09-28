@@ -20,6 +20,12 @@ namespace rose::tools
         // this deliberately small. Larger documents should use chunking/retrieval.
         std::size_t maximumTextBytes{ 64u * 1024u };
 
+        // Diagnostic/source-window reads may need to reach well beyond the first
+        // 64 KiB of a source file. Keep the scan bounded and symmetric with Rose's
+        // current text-mutation maximum so a build error near the end of an ordinary
+        // source file can still be inspected without loading arbitrarily large files.
+        std::size_t maximumTextRangeScanBytes{ 4u * 1024u * 1024u };
+
         // Binary containers such as PDFs need their complete byte stream in order
         // to parse reliably. Reject oversized files instead of truncating them.
         std::size_t maximumBinaryBytes{ 64u * 1024u * 1024u };
@@ -33,6 +39,20 @@ namespace rose::tools
         std::string text;
         std::uintmax_t originalSize{ 0 };
         bool truncated{ false };
+    };
+
+
+    struct ReadTextFileRangeResult
+    {
+        std::filesystem::path path;
+        std::string displayName;
+        std::string text;
+        std::uintmax_t originalSize{ 0 };
+        std::size_t requestedStartLine{ 1 };
+        std::size_t requestedLineCount{ 0 };
+        std::size_t returnedEndLine{ 0 };
+        bool scanTruncated{ false };
+        bool rangeTruncated{ false };
     };
 
 
@@ -64,6 +84,12 @@ namespace rose::tools
         [[nodiscard]]
         ReadTextFileResult readTextFile(
             const std::filesystem::path& path);
+
+        [[nodiscard]]
+        ReadTextFileRangeResult readTextFileLines(
+            const std::filesystem::path& path,
+            std::size_t startLine,
+            std::size_t lineCount);
 
         [[nodiscard]]
         ReadBinaryFileResult readBinaryFile(

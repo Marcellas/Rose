@@ -43,7 +43,8 @@ namespace rose::agent
         [[nodiscard]]
         AgentDecision decide(
             std::string_view userText,
-            std::string_view agentContext = {}) const;
+            std::string_view agentContext = {},
+            std::string_view trustedToolMetadata = {}) const;
 
     private:
         [[nodiscard]]

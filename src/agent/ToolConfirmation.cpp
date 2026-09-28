@@ -206,7 +206,8 @@ namespace rose::agent
 
     PendingToolConfirmation makePendingToolConfirmation(
         const tools::ToolRequest& request,
-        const tools::ToolDescriptor& descriptor)
+        const tools::ToolDescriptor& descriptor,
+        const std::optional<SourceRepairPlan>& repairPlan)
     {
         std::ostringstream summary;
 
@@ -214,6 +215,14 @@ namespace rose::agent
             << "Rose wants to run: "
             << descriptor.displayName
             << "\n";
+
+        if (repairPlan.has_value())
+        {
+            summary
+                << "\n"
+                << formatSourceRepairPlan(*repairPlan)
+                << "\n";
+        }
 
         for (const tools::ToolParameterDescriptor& parameter :
              descriptor.parameters)
@@ -223,6 +232,13 @@ namespace rose::agent
                     parameter.name);
 
             if (found == request.arguments.end())
+            {
+                continue;
+            }
+
+            if (
+                repairPlan.has_value()
+                && parameter.name == "expected_digest")
             {
                 continue;
             }

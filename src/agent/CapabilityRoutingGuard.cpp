@@ -6,6 +6,7 @@
 #include "tools/ToolTypes.h"
 
 #include <cctype>
+#include <charconv>
 #include <initializer_list>
 #include <filesystem>
 #include <sstream>
@@ -25,8 +26,11 @@ namespace rose::agent
             lowered.reserve(
                 text.size());
 
-            for (const unsigned char character : text)
+            for (const char rawCharacter : text)
             {
+                const unsigned char character =
+                    static_cast<unsigned char>(rawCharacter);
+
                 if (
                     character >= static_cast<unsigned char>('A')
                     && character <= static_cast<unsigned char>('Z'))
@@ -133,6 +137,376 @@ namespace rose::agent
 
 
             return false;
+        }
+
+
+        [[nodiscard]]
+        std::optional<std::string> explicitBuildConfiguration(
+            const std::string_view lowerUser)
+        {
+            if (containsAsciiWord(lowerUser, "relwithdebinfo")) return std::string{ "RelWithDebInfo" };
+            if (containsAsciiWord(lowerUser, "minsizerel")) return std::string{ "MinSizeRel" };
+            if (containsAsciiWord(lowerUser, "release")) return std::string{ "Release" };
+            if (containsAsciiWord(lowerUser, "debug")) return std::string{ "Debug" };
+            return std::nullopt;
+        }
+
+
+        [[nodiscard]]
+        bool isBuildTargetCharacter(
+            const unsigned char character) noexcept
+        {
+            return std::isalnum(character) != 0
+                || character == static_cast<unsigned char>('_')
+                || character == static_cast<unsigned char>('-')
+                || character == static_cast<unsigned char>('.')
+                || character == static_cast<unsigned char>('+')
+                || character == static_cast<unsigned char>(':');
+        }
+
+
+        [[nodiscard]]
+        std::optional<std::string> explicitBuildTarget(
+            const std::string_view userText,
+            const std::string_view lowerUser)
+        {
+            constexpr std::string_view keyword{ "target" };
+            std::size_t position = lowerUser.find(keyword);
+
+            while (position != std::string_view::npos)
+            {
+                const bool leftBoundary =
+                    position == 0
+                    || !isAsciiWordCharacter(
+                        static_cast<unsigned char>(lowerUser[position - 1]));
+                const std::size_t keywordEnd = position + keyword.size();
+                const bool rightBoundary =
+                    keywordEnd >= lowerUser.size()
+                    || !isAsciiWordCharacter(
+                        static_cast<unsigned char>(lowerUser[keywordEnd]));
+
+                if (leftBoundary && rightBoundary)
+                {
+                    std::size_t valueStart = keywordEnd;
+                    while (valueStart < userText.size()
+                           && std::isspace(static_cast<unsigned char>(userText[valueStart])) != 0)
+                    {
+                        ++valueStart;
+                    }
+                    if (valueStart < userText.size()
+                        && (userText[valueStart] == '=' || userText[valueStart] == ':'))
+                    {
+                        ++valueStart;
+                        while (valueStart < userText.size()
+                               && std::isspace(static_cast<unsigned char>(userText[valueStart])) != 0)
+                        {
+                            ++valueStart;
+                        }
+                    }
+
+                    std::size_t valueEnd = valueStart;
+                    while (valueEnd < userText.size()
+                           && isBuildTargetCharacter(
+                               static_cast<unsigned char>(userText[valueEnd])))
+                    {
+                        ++valueEnd;
+                    }
+
+                    if (valueEnd > valueStart)
+                    {
+                        return std::string{ userText.substr(valueStart, valueEnd - valueStart) };
+                    }
+                }
+
+                position = lowerUser.find(keyword, position + 1);
+            }
+
+            return std::nullopt;
+        }
+
+
+        [[nodiscard]]
+        std::optional<std::string> explicitBuildJobs(
+            const std::string_view lowerUser)
+        {
+            for (const std::string_view keyword : { std::string_view{ "jobs" }, std::string_view{ "job" } })
+            {
+                std::size_t position = lowerUser.find(keyword);
+                while (position != std::string_view::npos)
+                {
+                    const bool leftBoundary =
+                        position == 0
+                        || !isAsciiWordCharacter(
+                            static_cast<unsigned char>(lowerUser[position - 1]));
+                    const std::size_t keywordEnd = position + keyword.size();
+                    const bool rightBoundary =
+                        keywordEnd >= lowerUser.size()
+                        || !isAsciiWordCharacter(
+                            static_cast<unsigned char>(lowerUser[keywordEnd]));
+
+                    if (leftBoundary && rightBoundary)
+                    {
+                        std::size_t numberEnd = position;
+                        while (numberEnd > 0
+                               && std::isspace(static_cast<unsigned char>(lowerUser[numberEnd - 1])) != 0)
+                        {
+                            --numberEnd;
+                        }
+
+                        std::size_t numberStart = numberEnd;
+                        while (numberStart > 0
+                               && std::isdigit(static_cast<unsigned char>(lowerUser[numberStart - 1])) != 0)
+                        {
+                            --numberStart;
+                        }
+
+                        if (numberStart < numberEnd)
+                        {
+                            return std::string{ lowerUser.substr(numberStart, numberEnd - numberStart) };
+                        }
+                    }
+
+                    position = lowerUser.find(keyword, position + 1);
+                }
+            }
+
+            return std::nullopt;
+        }
+
+
+        [[nodiscard]]
+        std::optional<std::string> digitsAfterPhrase(
+            const std::string_view lowerUser,
+            const std::string_view phrase)
+        {
+            std::size_t position = lowerUser.find(phrase);
+
+            while (position != std::string_view::npos)
+            {
+                const bool leftBoundary =
+                    position == 0
+                    || !isAsciiWordCharacter(
+                        static_cast<unsigned char>(lowerUser[position - 1]));
+
+                std::size_t valueStart = position + phrase.size();
+                const bool rightBoundary =
+                    valueStart >= lowerUser.size()
+                    || !isAsciiWordCharacter(
+                        static_cast<unsigned char>(lowerUser[valueStart]));
+
+                if (leftBoundary && rightBoundary)
+                {
+                    while (
+                        valueStart < lowerUser.size()
+                        && std::isspace(
+                            static_cast<unsigned char>(lowerUser[valueStart])) != 0)
+                    {
+                        ++valueStart;
+                    }
+
+                    if (
+                        valueStart < lowerUser.size()
+                        && (lowerUser[valueStart] == '=' || lowerUser[valueStart] == ':'))
+                    {
+                        ++valueStart;
+                        while (
+                            valueStart < lowerUser.size()
+                            && std::isspace(
+                                static_cast<unsigned char>(lowerUser[valueStart])) != 0)
+                        {
+                            ++valueStart;
+                        }
+                    }
+
+                    std::size_t valueEnd = valueStart;
+                    while (
+                        valueEnd < lowerUser.size()
+                        && std::isdigit(
+                            static_cast<unsigned char>(lowerUser[valueEnd])) != 0)
+                    {
+                        ++valueEnd;
+                    }
+
+                    if (valueEnd > valueStart)
+                    {
+                        return std::string{
+                            lowerUser.substr(valueStart, valueEnd - valueStart)
+                        };
+                    }
+                }
+
+                position = lowerUser.find(phrase, position + 1);
+            }
+
+            return std::nullopt;
+        }
+
+
+        [[nodiscard]]
+        std::optional<std::string> explicitTextStartLine(
+            const std::string_view lowerUser)
+        {
+            for (const std::string_view phrase : {
+                     std::string_view{ "start_line" },
+                     std::string_view{ "starting at line" },
+                     std::string_view{ "start at line" },
+                     std::string_view{ "from line" },
+                     std::string_view{ "line" } })
+            {
+                const std::optional<std::string> value =
+                    digitsAfterPhrase(lowerUser, phrase);
+                if (value.has_value())
+                {
+                    return value;
+                }
+            }
+
+            return std::nullopt;
+        }
+
+
+        [[nodiscard]]
+        std::optional<std::string> explicitTextLineCount(
+            const std::string_view lowerUser)
+        {
+            if (const auto explicitCount =
+                    digitsAfterPhrase(lowerUser, "line_count");
+                explicitCount.has_value())
+            {
+                return explicitCount;
+            }
+
+            // Natural language commonly says "for 40 lines" or "read 40 lines".
+            // Reuse the bounded integer-before-keyword pattern without trying to
+            // interpret arbitrary numeric ranges or path digits.
+            std::size_t position = lowerUser.find("lines");
+            while (position != std::string_view::npos)
+            {
+                const bool leftBoundary =
+                    position == 0
+                    || !isAsciiWordCharacter(
+                        static_cast<unsigned char>(lowerUser[position - 1]));
+                const std::size_t end = position + 5;
+                const bool rightBoundary =
+                    end >= lowerUser.size()
+                    || !isAsciiWordCharacter(
+                        static_cast<unsigned char>(lowerUser[end]));
+
+                if (leftBoundary && rightBoundary)
+                {
+                    std::size_t numberEnd = position;
+                    while (
+                        numberEnd > 0
+                        && std::isspace(
+                            static_cast<unsigned char>(lowerUser[numberEnd - 1])) != 0)
+                    {
+                        --numberEnd;
+                    }
+
+                    std::size_t numberStart = numberEnd;
+                    while (
+                        numberStart > 0
+                        && std::isdigit(
+                            static_cast<unsigned char>(lowerUser[numberStart - 1])) != 0)
+                    {
+                        --numberStart;
+                    }
+
+                    if (numberStart < numberEnd)
+                    {
+                        return std::string{
+                            lowerUser.substr(numberStart, numberEnd - numberStart)
+                        };
+                    }
+                }
+
+                position = lowerUser.find("lines", position + 1);
+            }
+
+            return std::nullopt;
+        }
+
+
+        [[nodiscard]]
+        std::optional<std::string> explicitCTestName(
+            const std::string_view userText,
+            const std::string_view lowerUser)
+        {
+            constexpr std::string_view keyword{ "test" };
+            std::size_t position = lowerUser.find(keyword);
+
+            while (position != std::string_view::npos)
+            {
+                const bool leftBoundary =
+                    position == 0
+                    || !isAsciiWordCharacter(
+                        static_cast<unsigned char>(lowerUser[position - 1]));
+                const std::size_t keywordEnd = position + keyword.size();
+                const bool rightBoundary =
+                    keywordEnd >= lowerUser.size()
+                    || !isAsciiWordCharacter(
+                        static_cast<unsigned char>(lowerUser[keywordEnd]));
+
+                if (leftBoundary && rightBoundary)
+                {
+                    std::size_t valueStart = keywordEnd;
+                    while (valueStart < userText.size()
+                           && std::isspace(static_cast<unsigned char>(userText[valueStart])) != 0)
+                    {
+                        ++valueStart;
+                    }
+                    if (valueStart < userText.size()
+                        && (userText[valueStart] == '=' || userText[valueStart] == ':'))
+                    {
+                        ++valueStart;
+                        while (valueStart < userText.size()
+                               && std::isspace(static_cast<unsigned char>(userText[valueStart])) != 0)
+                        {
+                            ++valueStart;
+                        }
+                    }
+
+                    // "test C:\\Project" names the project action, not a test
+                    // called "C". Exact test filters remain optional.
+                    if (valueStart + 2 < userText.size()
+                        && std::isalpha(static_cast<unsigned char>(userText[valueStart])) != 0
+                        && userText[valueStart + 1] == ':'
+                        && (userText[valueStart + 2] == '\\' || userText[valueStart + 2] == '/'))
+                    {
+                        return std::nullopt;
+                    }
+
+                    std::size_t valueEnd = valueStart;
+                    while (valueEnd < userText.size()
+                           && isBuildTargetCharacter(
+                               static_cast<unsigned char>(userText[valueEnd])))
+                    {
+                        ++valueEnd;
+                    }
+
+                    if (valueEnd > valueStart)
+                    {
+                        const std::string candidate{
+                            userText.substr(valueStart, valueEnd - valueStart)
+                        };
+                        const std::string lowerCandidate = asciiLower(candidate);
+                        if (lowerCandidate != "all"
+                            && lowerCandidate != "in"
+                            && lowerCandidate != "for"
+                            && lowerCandidate != "on"
+                            && lowerCandidate != "the"
+                            && lowerCandidate != "suite"
+                            && lowerCandidate != "with")
+                        {
+                            return candidate;
+                        }
+                    }
+                }
+
+                position = lowerUser.find(keyword, position + 1);
+            }
+
+            return std::nullopt;
         }
 
 
@@ -495,6 +869,84 @@ namespace rose::agent
 
 
         [[nodiscard]]
+        bool explicitCodingRepairIntent(
+            const std::string_view userText)
+        {
+            const std::string lower = asciiLower(userText);
+
+            if (containsAnyAsciiWord(
+                    lower,
+                    { "fix", "repair", "debug", "diagnose", "diagnosis", "resolve" }))
+            {
+                return true;
+            }
+
+            return lower.find("make it build") != std::string::npos
+                || lower.find("get it building") != std::string::npos
+                || lower.find("make the build pass") != std::string::npos
+                || lower.find("fix the build") != std::string::npos
+                || lower.find("fix build") != std::string::npos
+                || lower.find("fix compile") != std::string::npos
+                || lower.find("compile error") != std::string::npos
+                || lower.find("compiler error") != std::string::npos
+                || lower.find("make the tests pass") != std::string::npos
+                || lower.find("make tests pass") != std::string::npos
+                || lower.find("get tests passing") != std::string::npos
+                || lower.find("fix the tests") != std::string::npos
+                || lower.find("fix test") != std::string::npos
+                || lower.find("test failure") != std::string::npos;
+        }
+
+
+        [[nodiscard]]
+        std::optional<std::string> lineValue(
+            const std::string_view block,
+            const std::string_view key)
+        {
+            const std::string needle = std::string{ key } + "=";
+            std::size_t position = block.find(needle);
+            while (position != std::string_view::npos)
+            {
+                if (position == 0 || block[position - 1] == '\n')
+                {
+                    const std::size_t begin = position + needle.size();
+                    const std::size_t end = block.find('\n', begin);
+                    return std::string{
+                        block.substr(
+                            begin,
+                            end == std::string_view::npos
+                                ? std::string_view::npos
+                                : end - begin)
+                    };
+                }
+                position = block.find(needle, position + 1);
+            }
+            return std::nullopt;
+        }
+
+
+        [[nodiscard]]
+        std::optional<std::size_t> positiveSizeValue(
+            const std::string_view block,
+            const std::string_view key)
+        {
+            const auto text = lineValue(block, key);
+            if (!text.has_value() || text->empty()) return std::nullopt;
+
+            std::size_t value{};
+            const auto [end, error] = std::from_chars(
+                text->data(), text->data() + text->size(), value);
+            if (error != std::errc{}
+                || end != text->data() + text->size()
+                || value == 0)
+            {
+                return std::nullopt;
+            }
+            return value;
+        }
+
+
+        [[nodiscard]]
         std::optional<std::string> singleResolvedProjectFilePath(
             const std::string_view agentContext)
         {
@@ -671,7 +1123,11 @@ namespace rose::agent
                     "describe",
                     "append",
                     "annotate",
+                    "build",
                     "clear",
+                    "compile",
+                    "configure",
+                    "reconfigure",
                     "combine",
                     "close",
                     "compress",
@@ -690,6 +1146,7 @@ namespace rose::agent
                     "open",
                     "pack",
                     "read",
+                    "rebuild",
                     "remove",
                     "remember",
                     "replace",
@@ -705,6 +1162,9 @@ namespace rose::agent
                     "split",
                     "summarize",
                     "tell",
+                    "test",
+                    "tests",
+                    "validate",
                     "store",
                     "unpack",
                     "unzip",
@@ -835,11 +1295,36 @@ namespace rose::agent
         }
 
 
+        if (containsAnyAsciiWord(
+            lowerUser,
+            {
+                "build",
+                "compile",
+                "rebuild"
+            }))
+        {
+            expandedUser += " build cmake project";
+        }
+
+
+        if (containsAnyAsciiWord(
+            lowerUser,
+            {
+                "configure",
+                "reconfigure"
+            }))
+        {
+            expandedUser += " cmake project";
+        }
+
+
         // Match meaningful capability nouns from each registered descriptor.
         // We intentionally ignore tiny/common words because this is a guard
         // against false negatives, not a full natural-language classifier.
         static constexpr std::string_view capabilityNouns[]{
             "archive",
+            "build",
+            "cmake",
             "directory",
             "file",
             "image",
@@ -850,6 +1335,7 @@ namespace rose::agent
             "pdf",
             "process",
             "program",
+            "project",
             "text",
             "zip"
         };
@@ -880,6 +1366,60 @@ namespace rose::agent
 
 
         return false;
+    }
+
+
+    bool CapabilityRoutingGuard::explicitCMakeTestExecutionIntent(
+        const std::string_view userText)
+    {
+        const std::string lowerUser =
+            asciiLower(
+                userText);
+
+
+        // Keep this intentionally narrower than a general semantic classifier.
+        // It exists only to prove that an actual CTest execution was requested.
+        // Both model-selected tool validation and deterministic recovery call the
+        // same helper so phrases such as "run all tests" cannot be accepted by
+        // one path and missed by the other.
+        const bool testVerb =
+            lowerUser.starts_with("test ")
+            || lowerUser.starts_with("test:")
+            || lowerUser.starts_with("run test ")
+            || lowerUser.starts_with("run tests")
+            || lowerUser.starts_with("run all test")
+            || lowerUser.starts_with("run ctest")
+            || lowerUser.find(" run test ") != std::string::npos
+            || lowerUser.find(" run tests") != std::string::npos
+            || lowerUser.find(" run all test") != std::string::npos
+            || lowerUser.find(" run ctest") != std::string::npos
+            || lowerUser.find(" execute test") != std::string::npos
+            || lowerUser.find(" rerun test") != std::string::npos
+            || lowerUser.find(" validate test") != std::string::npos
+            || lowerUser.find(" validate the test") != std::string::npos;
+
+
+        const bool explicitlyNonExecuting =
+            lowerUser.find("do not test") != std::string::npos
+            || lowerUser.find("don't test") != std::string::npos
+            || lowerUser.find("do not run tests") != std::string::npos
+            || lowerUser.find("don't run tests") != std::string::npos
+            || lowerUser.find("do not run the tests") != std::string::npos
+            || lowerUser.find("don't run the tests") != std::string::npos
+            || lowerUser.find("without testing") != std::string::npos
+            || lowerUser.find("how to test") != std::string::npos
+            || lowerUser.find("how do i test") != std::string::npos
+            || lowerUser.find("how to run test") != std::string::npos
+            || lowerUser.find("how do i run test") != std::string::npos
+            || lowerUser.find("show me how") != std::string::npos
+            || lowerUser.find("what test command") != std::string::npos
+            || lowerUser.starts_with("should i ")
+            || lowerUser.starts_with("should we ")
+            || lowerUser.starts_with("do i need to ")
+            || lowerUser.starts_with("do we need to ");
+
+
+        return testVerb && !explicitlyNonExecuting;
     }
 
 
@@ -923,6 +1463,213 @@ namespace rose::agent
         const std::string lowerUser =
             asciiLower(
                 userText);
+
+
+        // ---------------------------------------------------------------------
+        // Controlled existing-tree CMake reconfiguration
+        // ---------------------------------------------------------------------
+        const bool configureTopic =
+            containsAnyAsciiWord(lowerUser, { "configure", "reconfigure" })
+            || lowerUser.find("rerun cmake") != std::string::npos
+            || lowerUser.find("run cmake configure") != std::string::npos;
+
+        const bool explicitlyNonExecutingConfigure =
+            lowerUser.find("do not configure") != std::string::npos
+            || lowerUser.find("don't configure") != std::string::npos
+            || lowerUser.find("do not reconfigure") != std::string::npos
+            || lowerUser.find("don't reconfigure") != std::string::npos
+            || lowerUser.find("without configuring") != std::string::npos
+            || lowerUser.find("without reconfiguring") != std::string::npos
+            || lowerUser.find("how to configure") != std::string::npos
+            || lowerUser.find("how do i configure") != std::string::npos
+            || lowerUser.find("how to reconfigure") != std::string::npos
+            || lowerUser.find("how do i reconfigure") != std::string::npos
+            || lowerUser.find("show me how") != std::string::npos
+            || lowerUser.find("explain how") != std::string::npos
+            || lowerUser.find("what configure command") != std::string::npos
+            || lowerUser.find("what reconfigure command") != std::string::npos;
+
+        const bool configureIntent =
+            configureTopic
+            && !explicitlyNonExecutingConfigure;
+
+        if (configureIntent
+            && !completedTool(completedToolIds, "reconfigure_cmake_project")
+            && toolRegistered(toolRegistry, "reconfigure_cmake_project"))
+        {
+            const std::optional<std::string> path =
+                extractAbsoluteWindowsPath(userText);
+
+            if (path.has_value())
+            {
+                const std::filesystem::path source{ *path };
+                std::error_code error;
+                const bool ready =
+                    std::filesystem::is_directory(source, error)
+                    && !error
+                    && std::filesystem::is_regular_file(
+                        source / "CMakeLists.txt", error)
+                    && !error
+                    && std::filesystem::is_regular_file(
+                        source / "build" / "CMakeCache.txt", error)
+                    && !error;
+
+                if (ready)
+                {
+                    return tools::ToolRequest{
+                        .toolId = "reconfigure_cmake_project",
+                        .arguments = { { "source_path", *path } }
+                    };
+                }
+            }
+        }
+
+        // ---------------------------------------------------------------------
+        // Controlled local CMake build
+        // ---------------------------------------------------------------------
+        const bool buildTopic =
+            containsAnyAsciiWord(lowerUser, { "build", "compile", "rebuild" });
+
+        const bool explicitlyNonExecutingBuild =
+            lowerUser.find("do not build") != std::string::npos
+            || lowerUser.find("don't build") != std::string::npos
+            || lowerUser.find("without building") != std::string::npos
+            || lowerUser.find("how to build") != std::string::npos
+            || lowerUser.find("how do i build") != std::string::npos
+            || lowerUser.find("show me how") != std::string::npos
+            || lowerUser.find("what command") != std::string::npos;
+
+        const bool buildIntent =
+            buildTopic
+            && !explicitlyNonExecutingBuild;
+
+        if (buildIntent
+            && !completedTool(completedToolIds, "build_cmake_project")
+            && toolRegistered(toolRegistry, "build_cmake_project"))
+        {
+            const std::optional<std::string> path =
+                extractAbsoluteWindowsPath(userText);
+
+            if (path.has_value())
+            {
+                const std::filesystem::path source{ *path };
+                std::error_code error;
+                const bool ready =
+                    std::filesystem::is_directory(source, error)
+                    && !error
+                    && std::filesystem::is_regular_file(
+                        source / "CMakeLists.txt", error)
+                    && !error
+                    && std::filesystem::is_regular_file(
+                        source / "build" / "CMakeCache.txt", error)
+                    && !error;
+
+                if (ready)
+                {
+                    tools::ToolRequest request{
+                        .toolId = "build_cmake_project",
+                        .arguments = { { "source_path", *path } }
+                    };
+
+                    if (const std::optional<std::string> configuration =
+                            explicitBuildConfiguration(lowerUser);
+                        configuration.has_value())
+                    {
+                        request.arguments.emplace("configuration", *configuration);
+                    }
+
+                    if (const std::optional<std::string> target =
+                            explicitBuildTarget(userText, lowerUser);
+                        target.has_value())
+                    {
+                        request.arguments.emplace("target", *target);
+                    }
+
+                    if (const std::optional<std::string> jobs =
+                            explicitBuildJobs(lowerUser);
+                        jobs.has_value())
+                    {
+                        request.arguments.emplace("jobs", *jobs);
+                    }
+
+                    return request;
+                }
+            }
+        }
+
+
+        // ---------------------------------------------------------------------
+        // Controlled registered CTest execution
+        // ---------------------------------------------------------------------
+        const bool testTopic =
+            containsAnyAsciiWord(lowerUser, { "test", "tests", "ctest" })
+            && (
+                containsAnyAsciiWord(
+                    lowerUser,
+                    { "run", "execute", "rerun", "validate" })
+                || lowerUser.starts_with("test ")
+                || lowerUser.starts_with("test:"));
+
+        const bool testIntent =
+            explicitCMakeTestExecutionIntent(
+                userText);
+
+        if (testIntent
+            && !completedTool(completedToolIds, "run_cmake_tests")
+            && toolRegistered(toolRegistry, "run_cmake_tests"))
+        {
+            const std::optional<std::string> path =
+                extractAbsoluteWindowsPath(userText);
+
+            if (path.has_value())
+            {
+                const std::filesystem::path source{ *path };
+                std::error_code error;
+                const bool ready =
+                    std::filesystem::is_directory(source, error)
+                    && !error
+                    && std::filesystem::is_regular_file(
+                        source / "CMakeLists.txt", error)
+                    && !error
+                    && std::filesystem::is_regular_file(
+                        source / "build" / "CMakeCache.txt", error)
+                    && !error
+                    && std::filesystem::is_regular_file(
+                        source / "build" / "CTestTestfile.cmake", error)
+                    && !error;
+
+                if (ready)
+                {
+                    tools::ToolRequest request{
+                        .toolId = "run_cmake_tests",
+                        .arguments = { { "source_path", *path } }
+                    };
+
+                    if (const std::optional<std::string> configuration =
+                            explicitBuildConfiguration(lowerUser);
+                        configuration.has_value())
+                    {
+                        request.arguments.emplace("configuration", *configuration);
+                    }
+
+                    if (const std::optional<std::string> test =
+                            explicitCTestName(userText, lowerUser);
+                        test.has_value())
+                    {
+                        request.arguments.emplace("test", *test);
+                    }
+
+                    if (const std::optional<std::string> jobs =
+                            explicitBuildJobs(lowerUser);
+                        jobs.has_value())
+                    {
+                        request.arguments.emplace("jobs", *jobs);
+                    }
+
+                    return request;
+                }
+            }
+        }
 
 
         // ---------------------------------------------------------------------
@@ -1161,7 +1908,31 @@ namespace rose::agent
             || toolRegistered(toolRegistry, "inspect_database")
             || toolRegistered(toolRegistry, "inspect_shortcut");
 
-        if (readIntent && anyFileReaderRegistered)
+        // Build/test requests often contain words such as "target" or "show"
+        // that are also valid read-routing cues. Do not reinterpret a CMake source
+        // directory as a text file merely because the build already completed,
+        // the build could not be reconstructed, or the user explicitly asked for
+        // build instructions without execution. A genuine mixed request can still
+        // opt into file recovery with an explicit file-reading verb.
+        const bool explicitFileReadAction =
+            containsAnyAsciiWord(
+                lowerUser,
+                {
+                    "analyze",
+                    "inspect",
+                    "open",
+                    "read",
+                    "review",
+                    "summarize"
+                });
+
+        const bool suppressDevelopmentPathFileRecovery =
+            (configureTopic || buildTopic || testTopic)
+            && !explicitFileReadAction;
+
+        if (readIntent
+            && anyFileReaderRegistered
+            && !suppressDevelopmentPathFileRecovery)
         {
             std::optional<std::string> path =
                 extractAbsoluteWindowsPath(userText);
@@ -1328,10 +2099,30 @@ namespace rose::agent
                 if (!completedTool(completedToolIds, "read_text_file")
                     && toolRegistered(toolRegistry, "read_text_file"))
                 {
-                    return tools::ToolRequest{
+                    tools::ToolRequest request{
                         .toolId = "read_text_file",
                         .arguments = { { "path", *path } }
                     };
+
+                    const std::optional<std::string> startLine =
+                        explicitTextStartLine(lowerUser);
+                    if (startLine.has_value())
+                    {
+                        request.arguments.emplace(
+                            "start_line",
+                            *startLine);
+
+                        const std::optional<std::string> lineCount =
+                            explicitTextLineCount(lowerUser);
+                        if (lineCount.has_value())
+                        {
+                            request.arguments.emplace(
+                                "line_count",
+                                *lineCount);
+                        }
+                    }
+
+                    return request;
                 }
             }
         }
@@ -1444,6 +2235,65 @@ namespace rose::agent
         return std::nullopt;
     }
 
+
+    std::optional<tools::ToolRequest>
+    CapabilityRoutingGuard::recoverDiagnosticSourceReadRequest(
+        const std::string_view userText,
+        const tools::ToolRegistry& toolRegistry,
+        const std::string_view trustedToolMetadata)
+    {
+        if (!explicitCodingRepairIntent(userText)
+            || !toolRegistered(toolRegistry, "read_text_file")
+            || trustedToolMetadata.empty())
+        {
+            return std::nullopt;
+        }
+
+        const auto kind = lineValue(trustedToolMetadata, "metadata_kind");
+        const auto producer = lineValue(trustedToolMetadata, "producer_tool");
+        const auto succeeded = lineValue(trustedToolMetadata, "operation_success");
+        const auto path = lineValue(trustedToolMetadata, "diagnostic_path");
+        const auto startLine = positiveSizeValue(
+            trustedToolMetadata,
+            "suggested_read_start_line");
+        const auto lineCount = positiveSizeValue(
+            trustedToolMetadata,
+            "suggested_read_line_count");
+
+        const bool knownProducer = producer.has_value()
+            && (*producer == "build_cmake_project"
+                || *producer == "reconfigure_cmake_project"
+                || *producer == "run_cmake_tests");
+
+        if (!kind.has_value() || *kind != "source_diagnostic"
+            || !knownProducer
+            || !succeeded.has_value() || *succeeded != "false"
+            || !path.has_value() || path->empty()
+            || !looksLikeAbsoluteWindowsPath(*path)
+            || !startLine.has_value()
+            || !lineCount.has_value()
+            || *lineCount > 200)
+        {
+            return std::nullopt;
+        }
+
+        const files::FileFormatInfo format =
+            files::classifyFileFormat(std::filesystem::path{ *path });
+        if (format.kind != files::FileFormatKind::Unknown
+            && format.kind != files::FileFormatKind::TextSource)
+        {
+            return std::nullopt;
+        }
+
+        return tools::ToolRequest{
+            .toolId = "read_text_file",
+            .arguments = {
+                { "path", *path },
+                { "start_line", std::to_string(*startLine) },
+                { "line_count", std::to_string(*lineCount) }
+            }
+        };
+    }
 
     std::string CapabilityRoutingGuard::buildExecutionEvidenceGuard(
         const std::size_t completedToolCount)

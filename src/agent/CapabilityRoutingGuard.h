@@ -58,6 +58,14 @@ namespace rose::agent
             std::size_t completedToolCount);
 
 
+        // Shared deterministic classifier for explicit CTest execution intent.
+        // ToolSelectionAgent and direct-request recovery both use this so the
+        // model-validation path cannot drift from the fallback recovery path.
+        [[nodiscard]]
+        static bool explicitCMakeTestExecutionIntent(
+            std::string_view userText);
+
+
         // Recover only narrow, structurally obvious requests after BOTH model
         // routing passes declined to invoke a tool.
         //
@@ -71,6 +79,18 @@ namespace rose::agent
             const tools::ToolRegistry& toolRegistry,
             std::span<const std::string_view> completedToolIds,
             std::string_view agentContext = {});
+
+
+        // When a confirmed configure/build/test validation fails during an explicit repair/debug
+        // workflow, recover one narrow read_text_file window from Rose-owned
+        // trusted diagnostic metadata. Raw configure/compiler/test output is never parsed
+        // here and therefore cannot manufacture arbitrary read authority.
+        [[nodiscard]]
+        static std::optional<tools::ToolRequest>
+        recoverDiagnosticSourceReadRequest(
+            std::string_view userText,
+            const tools::ToolRegistry& toolRegistry,
+            std::string_view trustedToolMetadata);
 
 
         // Final-response evidence guard. This is appended whenever a request still

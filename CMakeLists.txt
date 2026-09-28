@@ -6,6 +6,10 @@ project(
     LANGUAGES CXX
 )
 
+# Rose-owned unit/integration targets are also registered with CTest so Rose can
+# run targeted validation independently from compilation.
+enable_testing()
+
 
 # =============================================================================
 # Rose-owned target helpers
@@ -581,6 +585,14 @@ add_executable(
     src/agent/ToolCompletionAccumulator.cpp
     src/agent/ToolConfirmation.h
     src/agent/ToolConfirmation.cpp
+    src/agent/SourceWindowBinding.h
+    src/agent/SourceWindowBinding.cpp
+    src/agent/SourceRepairPlan.h
+    src/agent/SourceRepairPlan.cpp
+    src/agent/RepairValidationReplay.h
+    src/agent/RepairValidationReplay.cpp
+    src/agent/RepairOutcomeTracker.h
+    src/agent/RepairOutcomeTracker.cpp
     src/agent/AgentLoop.h
     src/agent/AgentLoop.cpp
     src/agent/AgentJournal.h
@@ -742,10 +754,26 @@ add_executable(
     src/shortcuts/ShortcutService.cpp
     src/process/ProcessService.h
     src/process/ProcessService.cpp
+    src/development/BoundedProcessRunner.h
+    src/development/BoundedProcessRunner.cpp
+    src/development/ConfiguredCMakeProject.h
+    src/development/ConfiguredCMakeProject.cpp
+    src/development/DiagnosticExtraction.h
+    src/development/DiagnosticExtraction.cpp
+    src/development/CMakeBuildService.h
+    src/development/CMakeBuildService.cpp
+    src/development/CMakeConfigureService.h
+    src/development/CMakeConfigureService.cpp
+    src/development/CMakeTestService.h
+    src/development/CMakeTestService.cpp
     src/files/FileFormatCatalog.h
     src/files/FileFormatCatalog.cpp
     src/files/ProjectFileResolver.h
     src/files/ProjectFileResolver.cpp
+    src/files/SourceWindowDigest.h
+    src/files/SourceWindowDigest.cpp
+    src/files/TextFileMutationService.h
+    src/files/TextFileMutationService.cpp
     src/documents/OpenXmlDocumentExtractor.h
     src/documents/OpenXmlDocumentExtractor.cpp
     src/documents/OfficeDocumentMutationService.h
@@ -868,6 +896,8 @@ add_executable(
 
     src/tools/CreateTextFileTool.h
     src/tools/CreateTextFileTool.cpp
+    src/tools/EditTextFileTool.h
+    src/tools/EditTextFileTool.cpp
     src/tools/AnalyzeDirectoryDocumentsTool.h
     src/tools/AnalyzeDirectoryDocumentsTool.cpp
     src/tools/DocumentRenameMetadata.h
@@ -928,6 +958,12 @@ add_executable(
     src/tools/ListProcessesTool.cpp
     src/tools/CloseProcessTool.h
     src/tools/CloseProcessTool.cpp
+    src/tools/BuildCMakeProjectTool.h
+    src/tools/BuildCMakeProjectTool.cpp
+    src/tools/ReconfigureCMakeProjectTool.h
+    src/tools/ReconfigureCMakeProjectTool.cpp
+    src/tools/RunCMakeTestsTool.h
+    src/tools/RunCMakeTestsTool.cpp
     src/tools/RememberMemoryTool.h
     src/tools/RememberMemoryTool.cpp
 
@@ -1184,6 +1220,18 @@ add_executable(
     src/agent/FileAgentJournalStore.cpp
     src/agent/ToolExecutionService.h
     src/agent/ToolExecutionService.cpp
+    src/agent/ToolConfirmation.h
+    src/agent/ToolConfirmation.cpp
+    src/agent/SourceWindowBinding.h
+    src/agent/SourceWindowBinding.cpp
+    src/agent/SourceRepairPlan.h
+    src/agent/SourceRepairPlan.cpp
+    src/agent/RepairValidationReplay.h
+    src/agent/RepairValidationReplay.cpp
+    src/agent/RepairOutcomeTracker.h
+    src/agent/RepairOutcomeTracker.cpp
+    src/files/SourceWindowDigest.h
+    src/files/SourceWindowDigest.cpp
     src/agent/AgentExecution_test.cpp
 )
 
@@ -1636,6 +1684,76 @@ rose_configure_cpp20(RoseDatabaseShortcutToolsTest)
 rose_enable_warnings(RoseDatabaseShortcutToolsTest)
 
 # =============================================================================
+# Controlled developer build execution unit test
+# =============================================================================
+
+add_executable(
+    RoseDevelopmentToolsTest
+
+    src/development/BoundedProcessRunner.h
+    src/development/BoundedProcessRunner.cpp
+    src/development/ConfiguredCMakeProject.h
+    src/development/ConfiguredCMakeProject.cpp
+    src/development/DiagnosticExtraction.h
+    src/development/DiagnosticExtraction.cpp
+    src/development/CMakeBuildService.h
+    src/development/CMakeBuildService.cpp
+    src/development/CMakeConfigureService.h
+    src/development/CMakeConfigureService.cpp
+    src/development/CMakeTestService.h
+    src/development/CMakeTestService.cpp
+    src/tools/ToolTypes.h
+    src/tools/ITool.h
+    src/tools/BuildCMakeProjectTool.h
+    src/tools/BuildCMakeProjectTool.cpp
+    src/tools/ReconfigureCMakeProjectTool.h
+    src/tools/ReconfigureCMakeProjectTool.cpp
+    src/tools/RunCMakeTestsTool.h
+    src/tools/RunCMakeTestsTool.cpp
+    src/tools/DevelopmentTools_test.cpp
+)
+
+target_include_directories(
+    RoseDevelopmentToolsTest
+    PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/src"
+)
+
+rose_configure_cpp20(RoseDevelopmentToolsTest)
+rose_enable_warnings(RoseDevelopmentToolsTest)
+
+
+# =============================================================================
+# Controlled UTF-8 text/source mutation unit test
+# =============================================================================
+
+add_executable(
+    RoseTextMutationToolsTest
+
+    src/files/FileFormatCatalog.h
+    src/files/FileFormatCatalog.cpp
+    src/files/SourceWindowDigest.h
+    src/files/SourceWindowDigest.cpp
+    src/files/TextFileMutationService.h
+    src/files/TextFileMutationService.cpp
+    src/tools/ToolTypes.h
+    src/tools/ITool.h
+    src/tools/EditTextFileTool.h
+    src/tools/EditTextFileTool.cpp
+    src/tools/TextMutationTools_test.cpp
+)
+
+target_include_directories(
+    RoseTextMutationToolsTest
+    PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/src"
+)
+
+rose_configure_cpp20(RoseTextMutationToolsTest)
+rose_enable_warnings(RoseTextMutationToolsTest)
+
+
+# =============================================================================
 # Controlled Office Open XML mutation tool unit test
 # =============================================================================
 
@@ -1740,6 +1858,14 @@ add_executable(
     src/tools/ScanDirectoryTreeTool.cpp
     src/tools/BatchMovePathsTool.h
     src/tools/BatchMovePathsTool.cpp
+    src/permissions/PermissionSystem.h
+    src/permissions/PermissionSystem.cpp
+    src/files/SourceWindowDigest.h
+    src/files/SourceWindowDigest.cpp
+    src/tools/ReadFileTool.h
+    src/tools/ReadFileTool.cpp
+    src/tools/ReadTextFileRegisteredTool.h
+    src/tools/ReadTextFileRegisteredTool.cpp
     src/tools/FilesystemTools_test.cpp
 )
 
@@ -1890,6 +2016,52 @@ rose_enable_warnings(RoseContentPolicyTest)
 
 
 # =============================================================================
+# CTest registration
+# =============================================================================
+#
+# RoseRegressionCheck remains the build-time cumulative tripwire below. CTest is
+# additionally registered so the agent can execute one exact test (or all tests)
+# after a build without treating an executable path as arbitrary shell authority.
+
+set(
+    ROSE_CTEST_TARGETS
+    RoseBuildIdentityTest
+    RoseContextSafeDocumentSynthesizerTest
+    RoseProjectFileResolverTest
+    RoseToolSelectionAgentTest
+    RoseToolCompletionTest
+    RoseAgentExecutionTest
+    RoseContentPolicyTest
+    RoseImageGenerationProfileTest
+    RoseLocalImageModelPresetTest
+    RoseMemorySystemTest
+    RoseWorkspaceSystemTest
+    RoseChatBridgeWorkspaceTest
+    RoseBackgroundJobsTest
+    RoseProjectKnowledgeTest
+    RoseIntegrationSystemTest
+    RoseOutlookIntegrationTest
+    RoseZipArchiveToolsTest
+    RoseMediaToolsTest
+    RoseDatabaseShortcutToolsTest
+    RoseProcessToolsTest
+    RoseDevelopmentToolsTest
+    RoseTextMutationToolsTest
+    RoseOfficeMutationToolsTest
+    RosePdfMutationToolsTest
+    RoseFilesystemToolsTest
+    RoseDirectoryDocumentAnalysisTest
+    RoseAvatarPresentationTest
+)
+
+foreach(rose_test_target IN LISTS ROSE_CTEST_TARGETS)
+    add_test(
+        NAME ${rose_test_target}
+        COMMAND $<TARGET_FILE:${rose_test_target}>
+    )
+endforeach()
+
+# =============================================================================
 # Source-level regression contract
 # =============================================================================
 #
@@ -1966,6 +2138,12 @@ add_custom_target(
         $<TARGET_FILE:RoseProcessToolsTest>
 
     COMMAND
+        $<TARGET_FILE:RoseDevelopmentToolsTest>
+
+    COMMAND
+        $<TARGET_FILE:RoseTextMutationToolsTest>
+
+    COMMAND
         $<TARGET_FILE:RoseOfficeMutationToolsTest>
 
     COMMAND
@@ -2001,6 +2179,8 @@ add_custom_target(
         RoseMediaToolsTest
         RoseDatabaseShortcutToolsTest
         RoseProcessToolsTest
+        RoseDevelopmentToolsTest
+        RoseTextMutationToolsTest
         RoseOfficeMutationToolsTest
         RosePdfMutationToolsTest
         RoseFilesystemToolsTest

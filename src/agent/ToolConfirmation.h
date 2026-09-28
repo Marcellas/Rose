@@ -1,7 +1,9 @@
 #pragma once
 
+#include "agent/SourceRepairPlan.h"
 #include "tools/ToolTypes.h"
 
+#include <optional>
 #include <string>
 
 namespace rose::agent
@@ -23,7 +25,8 @@ namespace rose::agent
     [[nodiscard]]
     PendingToolConfirmation makePendingToolConfirmation(
         const tools::ToolRequest& request,
-        const tools::ToolDescriptor& descriptor);
+        const tools::ToolDescriptor& descriptor,
+        const std::optional<SourceRepairPlan>& repairPlan = std::nullopt);
 
 
     // Trusted transient context for Rose's normal conversational response.

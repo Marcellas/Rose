@@ -17,8 +17,12 @@
 #include "core/BuildIdentity.h"
 #include "core/RoseCore.h"
 #include "database/DatabaseService.h"
+#include "development/CMakeBuildService.h"
+#include "development/CMakeConfigureService.h"
+#include "development/CMakeTestService.h"
 #include "documents/OfficeDocumentMutationService.h"
 #include "files/ProjectFileResolver.h"
+#include "files/TextFileMutationService.h"
 #include "imagegen/ImageGenerationProfiles.h"
 #include "imagegen/LocalImageModelPreference.h"
 #include "imagegen/LocalImageModelPreset.h"
@@ -57,8 +61,12 @@
 #include "tools/ApplyRenamePlanTool.h"
 #include "tools/AttachmentIngestion.h"
 #include "tools/BatchMovePathsTool.h"
+#include "tools/BuildCMakeProjectTool.h"
+#include "tools/ReconfigureCMakeProjectTool.h"
+#include "tools/RunCMakeTestsTool.h"
 #include "tools/PlanDirectoryDocumentRenamesTool.h"
 #include "tools/CreateTextFileTool.h"
+#include "tools/EditTextFileTool.h"
 #include "tools/CreateDirectoryTool.h"
 #include "tools/CreateZipArchiveTool.h"
 #include "tools/GenerateImageTool.h"
@@ -1066,6 +1074,10 @@ int main()
                     rose::archives::WindowsZipArchiveService zipArchiveService;
                     rose::media::LocalMediaService mediaService;
                     rose::database::LocalDatabaseService databaseService;
+                    rose::development::LocalCMakeBuildService cmakeBuildService;
+                    rose::development::LocalCMakeConfigureService cmakeConfigureService;
+                    rose::development::LocalCMakeTestService cmakeTestService;
+                    rose::files::LocalTextFileMutationService textMutationService;
                     rose::documents::LocalOfficeDocumentMutationService officeMutationService;
                     rose::documents::LocalPdfDocumentMutationService pdfMutationService;
                     rose::shortcuts::LocalShortcutService shortcutService;
@@ -1082,6 +1094,14 @@ int main()
                     toolRegistry.registerTool(
                         std::make_unique<
                             rose::tools::CreateTextFileTool>());
+
+                    // Existing text/source mutation is a separate LocalWrite
+                    // boundary from file reading/creation. The adapter borrows the
+                    // worker-owned stateless service, which stages and flushes a
+                    // sibling file before replacing the original.
+                    toolRegistry.registerTool(
+                        std::make_unique<rose::tools::EditTextFileTool>(
+                            textMutationService));
 
                     // Filesystem organization primitives. All mutation tools are
                     // confirmation-gated; move_path never overwrites, and
@@ -1152,7 +1172,9 @@ int main()
                     // Read-only filesystem discovery is intentionally still
                     // confirmation-gated. list_directory reveals only one level;
                     // read_text_file reuses the existing exact-file one-shot read
-                    // primitive and returns a context-bounded UTF-8 prefix.
+                    // primitive. It returns a context-bounded UTF-8 prefix by
+                    // default and can also read a bounded diagnostic source window
+                    // by one-based line number without widening filesystem access.
                     toolRegistry.registerTool(
                         std::make_unique<
                             rose::tools::ListDirectoryTool>());
@@ -1292,6 +1314,32 @@ int main()
                         std::make_unique<rose::tools::CloseProcessTool>(
                             processService));
 
+                    // Controlled developer build execution. The service invokes
+                    // cmake.exe directly (never cmd.exe/PowerShell), captures a
+                    // bounded diagnostic stream, and can only build the existing
+                    // <source>/build tree after verifying its CMakeCache belongs
+                    // to the requested source. Build rules may execute project
+                    // code, so the tool remains an explicit ExternalEffect boundary.
+                    toolRegistry.registerTool(
+                        std::make_unique<rose::tools::BuildCMakeProjectTool>(
+                            cmakeBuildService));
+
+                    // Controlled CMake reconfiguration is intentionally limited
+                    // to an already-configured, source-matched <source>/build
+                    // tree. It cannot create or retarget a build tree, but CMake
+                    // scripts may still execute project-controlled behavior, so
+                    // this remains confirmation-gated.
+                    toolRegistry.registerTool(
+                        std::make_unique<rose::tools::ReconfigureCMakeProjectTool>(
+                            cmakeConfigureService));
+
+                    // Controlled CTest execution is a separate effect boundary
+                    // from compilation. It runs only tests registered in the
+                    // already-configured build tree through ctest.exe directly.
+                    toolRegistry.registerTool(
+                        std::make_unique<rose::tools::RunCMakeTestsTool>(
+                            cmakeTestService));
+
 
                     // ---------------------------------------------------------
                     // First bounded Agent layer
@@ -1342,7 +1390,9 @@ int main()
                     };
 
                     // The bounded Agent loop may execute several safe steps in one
-                    // request, but never more than its configured ceiling.
+                    // request, but never more than its configured ceiling. Five steps are enough
+                    // for one bounded read/edit/build/repair/build coding cycle without
+                    // turning this checkpoint into an open-ended autonomous planner.
                     //
                     // It still cannot bypass ToolExecutionPolicy. A step requiring
                     // consent pauses the WHOLE run with the exact ToolRequest intact.
@@ -1353,7 +1403,7 @@ int main()
                         agentJournal,
                         logger,
                         rose::agent::AgentLoopConfig{
-                            .maximumToolExecutions = 3
+                            .maximumToolExecutions = 7
                         }
                     };
 
@@ -1883,7 +1933,7 @@ int main()
                         << "/build, "
                         << "/clear, "
                         << "/log silent|normal|verbose, "
-                        << "/quit\n\n";
+                        << "/quit or /exit\n\n";
 
 
                     // =========================================================
@@ -3736,9 +3786,15 @@ int main()
                             continue;
                         }
 
+                        // /exit is an intuitive alias for /quit. Keep both local
+                        // to Rose rather than letting an unknown slash command reach
+                        // the language model, which could otherwise claim that the
+                        // process exited even though no shutdown occurred.
                         if (
                             commandEligible
-                            && submittedText == "/quit")
+                            && (
+                                commandText == "/quit"
+                                || commandText == "/exit"))
                         {
                             chatBridge.requestShutdown();
                             break;
@@ -3756,6 +3812,39 @@ int main()
                                     .type =
                                         rose::ui::ChatEventType::
                                         ConversationCleared
+                                });
+
+                            continue;
+                        }
+
+
+                        // Slash-prefixed text is Rose's local command namespace.
+                        // Once every known command above has had a chance to handle
+                        // the submission, fail closed here rather than forwarding an
+                        // unknown command to the model. A model response such as
+                        // "Okay, I've exited" is not execution evidence and must
+                        // never impersonate a local command side effect.
+                        if (
+                            commandEligible
+                            && !commandText.empty()
+                            && commandText.front() == '/')
+                        {
+                            chatBridge.postEvent(
+                                rose::ui::ChatEvent{
+                                    .type =
+                                        rose::ui::ChatEventType::
+                                        AssistantStarted
+                                });
+
+                            chatBridge.postEvent(
+                                rose::ui::ChatEvent{
+                                    .type =
+                                        rose::ui::ChatEventType::
+                                        AssistantFinished,
+                                    .text =
+                                        "Unknown Rose command. Use /tools to inspect "
+                                        "registered tools, /build for binary identity, "
+                                        "or /quit (alias /exit) to close Rose."
                                 });
 
                             continue;

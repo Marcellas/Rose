@@ -2,6 +2,10 @@
 #include "tools/CreateDirectoryTool.h"
 #include "tools/MovePathTool.h"
 #include "tools/RecyclePathTool.h"
+#include "permissions/PermissionSystem.h"
+#include "files/SourceWindowDigest.h"
+#include "tools/ReadFileTool.h"
+#include "tools/ReadTextFileRegisteredTool.h"
 #include "tools/ScanDirectoryTreeTool.h"
 
 #include <filesystem>
@@ -196,6 +200,160 @@ int main()
         require(!std::filesystem::exists(batchB), "batch source B should move");
         require(std::filesystem::exists(batchARenamed), "batch destination A should exist");
         require(std::filesystem::exists(batchBRenamed), "batch destination B should exist");
+
+        // ------------------------------------------------------------------
+        // Exact UTF-8 source windows for compiler/test diagnostics
+        // ------------------------------------------------------------------
+        const std::filesystem::path largeSource =
+            root / "large-source.cpp";
+
+        {
+            std::ofstream stream{
+                largeSource,
+                std::ios::binary
+            };
+
+            for (int line = 1; line <= 3200; ++line)
+            {
+                stream
+                    << "// source line "
+                    << line
+                    << " keeps this fixture beyond the ordinary prefix reader boundary";
+
+                if (line == 2500)
+                {
+                    stream << " DIAGNOSTIC_TARGET";
+                }
+
+                stream << "\r\n";
+            }
+        }
+
+        rose::permissions::PermissionSystem readPermissions;
+        rose::tools::ReadFileTool readFileTool{
+            readPermissions,
+            rose::tools::ReadFileConfig{
+                .maximumTextBytes = 64u * 1024u,
+                .maximumTextRangeScanBytes = 4u * 1024u * 1024u,
+                .maximumBinaryBytes = 1024u * 1024u
+            }
+        };
+
+        rose::tools::ReadTextFileRegisteredTool sourceReader{
+            readPermissions,
+            readFileTool,
+            rose::tools::ReadTextFileRegisteredToolConfig{
+                .maximumObservationBytes = 8u * 1024u,
+                .defaultLineCount = 80,
+                .maximumLineCount = 200
+            }
+        };
+
+        require(
+            sourceReader.descriptor().risk
+                == rose::tools::ToolRisk::ReadOnly,
+            "read_text_file must remain ReadOnly");
+        require(
+            sourceReader.descriptor().consent
+                == rose::tools::ToolConsent::RequiresConfirmation,
+            "read_text_file must remain confirmation-gated");
+        require(
+            sourceReader.descriptor().parameters.size() == 3,
+            "read_text_file should expose path plus optional source-window parameters");
+
+        const rose::tools::ToolResult diagnosticWindow =
+            sourceReader.execute(
+                rose::tools::ToolRequest{
+                    .toolId = "read_text_file",
+                    .arguments = {
+                        { "path", largeSource.string() },
+                        { "start_line", "2498" },
+                        { "line_count", "5" }
+                    }
+                });
+
+        require(
+            diagnosticWindow.success,
+            "read_text_file source window should succeed");
+        require(
+            diagnosticWindow.message.find("requested_start_line=2498")
+                != std::string::npos,
+            "source-window observation should retain its one-based start line");
+        require(
+            diagnosticWindow.message.find("DIAGNOSTIC_TARGET")
+                != std::string::npos,
+            "source-window read must reach diagnostic context beyond the ordinary 64 KiB prefix");
+        require(
+            diagnosticWindow.message.find("2498|// source line 2498")
+                != std::string::npos
+                && diagnosticWindow.message.find("2500|// source line 2500")
+                    != std::string::npos,
+            "source-window observations should expose absolute one-based line numbers without changing source content after the delimiter");
+        require(
+            diagnosticWindow.sourceWindowEvidence.has_value(),
+            "a complete source-window read should produce typed patch provenance");
+        require(
+            diagnosticWindow.sourceWindowEvidence->startLine == 2498
+                && diagnosticWindow.sourceWindowEvidence->lineCount == 5
+                && diagnosticWindow.sourceWindowEvidence->lineSha256s.size() == 5
+                && rose::files::isSourceWindowSha256(
+                    diagnosticWindow.sourceWindowEvidence->sha256),
+            "source-window provenance should retain the exact observed coordinates and SHA-256 digest");
+        require(
+            diagnosticWindow.trustedMetadata.find("producer_tool=read_text_file")
+                != std::string::npos
+                && diagnosticWindow.trustedMetadata.find("source_window_sha256=")
+                    != std::string::npos,
+            "source-window read should expose only structured digest metadata through the trusted routing channel");
+        require(
+            diagnosticWindow.message.find("source line 2497")
+                == std::string::npos,
+            "source-window read must not leak lines before the requested window");
+        require(
+            diagnosticWindow.message.find("source line 2503")
+                == std::string::npos,
+            "source-window read must stop after the requested line count");
+
+        bool unboundedLineCountRejected = false;
+        try
+        {
+            (void)sourceReader.execute(
+                rose::tools::ToolRequest{
+                    .toolId = "read_text_file",
+                    .arguments = {
+                        { "path", largeSource.string() },
+                        { "start_line", "2400" },
+                        { "line_count", "5000" }
+                    }
+                });
+        }
+        catch (const std::invalid_argument&)
+        {
+            unboundedLineCountRejected = true;
+        }
+        require(
+            unboundedLineCountRejected,
+            "read_text_file must reject model-selected source windows above the configured line bound");
+
+        bool lineCountWithoutStartRejected = false;
+        try
+        {
+            (void)sourceReader.execute(
+                rose::tools::ToolRequest{
+                    .toolId = "read_text_file",
+                    .arguments = {
+                        { "path", largeSource.string() },
+                        { "line_count", "20" }
+                    }
+                });
+        }
+        catch (const std::invalid_argument&)
+        {
+            lineCountWithoutStartRejected = true;
+        }
+        require(
+            lineCountWithoutStartRejected,
+            "read_text_file line_count must fail closed without start_line");
 
         rose::tools::RecyclePathTool recyclePath;
         require(

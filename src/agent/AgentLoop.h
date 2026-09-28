@@ -1,9 +1,12 @@
 #pragma once
 
 #include "agent/ToolCompletionAccumulator.h"
+#include "agent/RepairValidationReplay.h"
+#include "agent/RepairOutcomeTracker.h"
 #include "agent/ToolConfirmation.h"
 #include "agent/AgentJournal.h"
 #include "artifacts/Artifact.h"
+#include "tools/ToolTypes.h"
 
 #include <cstddef>
 #include <cstdint>
@@ -48,11 +51,39 @@ namespace rose::agent
         std::string originalUserText;
         std::string transientContext;
 
+        // Latest Rose-owned structured metadata from a completed tool. This is
+        // kept separate from ordinary transientContext so untrusted tool/file
+        // output cannot spoof routing metadata by printing internal tag text.
+        std::string latestTrustedToolMetadata{};
+
+        // A grounded configure/build/test diagnostic survives the immediately following
+        // matching source-window read so Rose can explain WHY a later patch is
+        // being proposed. It is cleared by unrelated reads/actions and by any
+        // mutation. Raw configure/compiler/test text never enters this trusted field.
+        std::string latestDiagnosticMetadata{};
+
+        // Exact source-window provenance from the latest completed range read.
+        // This remains typed and ephemeral; source contents themselves stay in
+        // transientContext as untrusted evidence. A later unrelated tool clears it.
+        std::optional<tools::SourceWindowEvidence> latestSourceWindowEvidence{};
+
+        // Exact failed configure/build/test request retained only long enough to validate a
+        // provenance-bound source repair. The replay becomes eligible only after
+        // that repair succeeds and still requires normal confirmation.
+        RepairValidationReplayState repairValidationReplay{};
+
+        // Correlates one diagnostic-driven patch with its exact post-repair
+        // validation result. This state is ephemeral execution provenance only;
+        // the persistent black-box trail is represented by journal events.
+        RepairOutcomeState repairOutcome{};
+
         std::size_t executedToolCount{ 0 };
 
         // Canonical fingerprints of tool requests that have already executed in
         // this run. This prevents an imperfect model from repeatedly issuing the
-        // exact same side effect until the step budget is exhausted.
+        // exact same side effect until the step budget is exhausted. A tightly
+        // scoped exception permits re-running the same CMake build after an
+        // intervening confirmed local mutation so one repair cycle can validate.
         std::vector<std::string> executedRequestFingerprints;
 
         ToolCompletionAccumulator toolCompletion;

@@ -95,6 +95,13 @@ namespace rose::tools
             };
         }
 
+        if (config_.maximumTextRangeScanBytes == 0)
+        {
+            throw std::invalid_argument{
+                "ReadFileTool maximumTextRangeScanBytes must be greater than zero."
+            };
+        }
+
         if (config_.maximumBinaryBytes == 0)
         {
             throw std::invalid_argument{
@@ -188,6 +195,199 @@ namespace rose::tools
             .truncated = file.size
                 > static_cast<std::uintmax_t>(
                     config_.maximumTextBytes)
+        };
+    }
+
+
+    ReadTextFileRangeResult ReadFileTool::readTextFileLines(
+        const std::filesystem::path& path,
+        const std::size_t startLine,
+        const std::size_t lineCount)
+    {
+        if (startLine == 0 || lineCount == 0)
+        {
+            throw std::invalid_argument{
+                "Text line-range reads require one-based startLine and a non-zero lineCount."
+            };
+        }
+
+        // As with the ordinary prefix reader, consume the exact one-shot grant
+        // before opening file contents. A range read does not widen permission to
+        // the parent directory or to any sibling source file.
+        if (!permissions_.consumeReadOnce(path))
+        {
+            throw std::runtime_error{
+                "ReadFileTool denied access because no one-shot read permission exists for that file."
+            };
+        }
+
+        const ValidatedFile file =
+            validateReadableRegularFile(path);
+
+        const std::size_t bytesToRead =
+            static_cast<std::size_t>(
+                std::min<std::uintmax_t>(
+                    file.size,
+                    static_cast<std::uintmax_t>(
+                        config_.maximumTextRangeScanBytes)));
+
+        std::ifstream stream =
+            openBinaryStream(path);
+
+        std::string bytes(
+            bytesToRead,
+            '\0');
+
+        if (bytesToRead > 0)
+        {
+            stream.read(
+                bytes.data(),
+                static_cast<std::streamsize>(
+                    bytesToRead));
+
+            const std::streamsize actual =
+                stream.gcount();
+
+            if (actual < 0)
+            {
+                throw std::runtime_error{
+                    "Could not read source text range: "
+                    + path.string()
+                };
+            }
+
+            bytes.resize(
+                static_cast<std::size_t>(actual));
+        }
+
+        if (looksLikeBinary(bytes))
+        {
+            throw std::runtime_error{
+                "This attachment appears to be binary. The current text reader supports UTF-8 text/source files only: "
+                + path.filename().string()
+            };
+        }
+
+        // Strip the UTF-8 BOM before line indexing so line 1 begins with source
+        // content, matching the ordinary readTextFile behavior.
+        if (
+            bytes.size() >= 3
+            && static_cast<unsigned char>(bytes[0]) == 0xEFu
+            && static_cast<unsigned char>(bytes[1]) == 0xBBu
+            && static_cast<unsigned char>(bytes[2]) == 0xBFu)
+        {
+            bytes.erase(0, 3);
+        }
+
+        if (!isValidUtf8(bytes))
+        {
+            throw std::runtime_error{
+                "This attachment is not valid UTF-8 text yet: "
+                + path.filename().string()
+            };
+        }
+
+        std::size_t begin{ 0 };
+        std::size_t currentLine{ 1 };
+
+        while (currentLine < startLine)
+        {
+            const std::size_t newline =
+                bytes.find('\n', begin);
+
+            if (newline == std::string::npos)
+            {
+                const bool scanTruncated =
+                    file.size
+                    > static_cast<std::uintmax_t>(
+                        config_.maximumTextRangeScanBytes);
+
+                if (scanTruncated)
+                {
+                    throw std::runtime_error{
+                        "The requested source line is beyond Rose's bounded text-range scan limit ("
+                        + std::to_string(config_.maximumTextRangeScanBytes)
+                        + " bytes): "
+                        + path.filename().string()
+                    };
+                }
+
+                throw std::runtime_error{
+                    "The requested start line is beyond the end of the text file: "
+                    + std::to_string(startLine)
+                };
+            }
+
+            begin = newline + 1;
+            ++currentLine;
+        }
+
+        if (begin >= bytes.size())
+        {
+            const bool scanTruncated =
+                file.size
+                > static_cast<std::uintmax_t>(
+                    config_.maximumTextRangeScanBytes);
+
+            if (scanTruncated)
+            {
+                throw std::runtime_error{
+                    "The requested source line is beyond Rose's bounded text-range scan limit ("
+                    + std::to_string(config_.maximumTextRangeScanBytes)
+                    + " bytes): "
+                    + path.filename().string()
+                };
+            }
+
+            throw std::runtime_error{
+                "The requested start line is beyond the end of the text file: "
+                + std::to_string(startLine)
+            };
+        }
+
+        std::size_t end = begin;
+        std::size_t returnedLines{ 0 };
+
+        while (
+            returnedLines < lineCount
+            && end < bytes.size())
+        {
+            const std::size_t newline =
+                bytes.find('\n', end);
+
+            if (newline == std::string::npos)
+            {
+                end = bytes.size();
+                ++returnedLines;
+                break;
+            }
+
+            end = newline + 1;
+            ++returnedLines;
+        }
+
+        const bool scanTruncated =
+            file.size
+            > static_cast<std::uintmax_t>(
+                config_.maximumTextRangeScanBytes);
+
+        // rangeTruncated means Rose could not prove that the complete requested
+        // line window was available because the bounded scan ended first.
+        const bool rangeTruncated =
+            returnedLines < lineCount
+            && scanTruncated
+            && end == bytes.size();
+
+        return ReadTextFileRangeResult{
+            .path = path,
+            .displayName = path.filename().string(),
+            .text = bytes.substr(begin, end - begin),
+            .originalSize = file.size,
+            .requestedStartLine = startLine,
+            .requestedLineCount = lineCount,
+            .returnedEndLine = startLine + returnedLines - 1,
+            .scanTruncated = scanTruncated,
+            .rangeTruncated = rangeTruncated
         };
     }
 

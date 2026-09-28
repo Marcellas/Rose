@@ -35,7 +35,11 @@ namespace rose::agent
         RunFailed,
         OperationStarted,
         OperationFinished,
-        OperationFailed
+        OperationFailed,
+        RepairPlanned,
+        RepairApplied,
+        RepairValidated,
+        RepairValidationFailed
     };
 
 

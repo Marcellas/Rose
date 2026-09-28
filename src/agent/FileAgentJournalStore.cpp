@@ -183,7 +183,7 @@ namespace rose::agent
             const auto typeValue = parseInteger<unsigned int>(
                 readLine(input, "event type"),
                 "event type");
-            if (typeValue > static_cast<unsigned int>(AgentEventType::OperationFailed))
+            if (typeValue > static_cast<unsigned int>(AgentEventType::RepairValidationFailed))
             {
                 throw std::runtime_error{
                     "Agent journal contains an unknown event type."

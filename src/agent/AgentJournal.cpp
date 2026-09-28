@@ -172,6 +172,18 @@ namespace rose::agent
 
         case AgentEventType::OperationFailed:
             return "OperationFailed";
+
+        case AgentEventType::RepairPlanned:
+            return "RepairPlanned";
+
+        case AgentEventType::RepairApplied:
+            return "RepairApplied";
+
+        case AgentEventType::RepairValidated:
+            return "RepairValidated";
+
+        case AgentEventType::RepairValidationFailed:
+            return "RepairValidationFailed";
         }
 
         return "Unknown";

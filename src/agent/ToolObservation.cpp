@@ -81,8 +81,11 @@ namespace rose::agent
         text
             << "</rose_tool_observation>\n"
             << "Use this observation to decide what remains of the ORIGINAL user "
-               "request. Do not repeat this exact completed action. If all requested "
-               "work is complete, respond instead of selecting another tool.";
+               "request. Do not repeat this exact completed action. The narrow exception "
+               "is reconfigure_cmake_project, build_cmake_project, or run_cmake_tests after a later confirmed local mutation "
+               "when another validation pass is necessary; AgentLoop enforces whether that "
+               "retry is actually allowed. If all requested work is complete, respond instead "
+               "of selecting another tool.";
 
         return text.str();
     }
