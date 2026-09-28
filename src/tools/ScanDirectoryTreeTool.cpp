@@ -18,6 +18,7 @@ namespace rose::tools
         struct EntrySummary
         {
             std::string relativePath;
+            std::string absolutePath;
             std::string type;
             std::uintmax_t size{ 0 };
             bool hasSize{ false };
@@ -146,6 +147,59 @@ namespace rose::tools
 
             return value;
         }
+
+
+        [[nodiscard]]
+        std::size_t relativePathDepth(
+            const std::string_view path) noexcept
+        {
+            return static_cast<std::size_t>(
+                std::count_if(
+                    path.begin(),
+                    path.end(),
+                    [](const char character)
+                    {
+                        return character == '\\' || character == '/';
+                    }));
+        }
+
+
+        [[nodiscard]]
+        std::string_view firstPathComponent(
+            const std::string_view path) noexcept
+        {
+            const std::size_t separator =
+                path.find_first_of("\\/");
+
+            return path.substr(0, separator);
+        }
+
+
+        [[nodiscard]]
+        bool conventionalGeneratedTree(
+            const std::string_view relativePath)
+        {
+            const std::string first =
+                lowerAscii(
+                    std::string{
+                        firstPathComponent(relativePath)
+                    });
+
+            return
+                first == ".git"
+                || first == ".vs"
+                || first == ".cache"
+                || first == "build"
+                || first.starts_with("build-")
+                || first == "out"
+                || first == "dist"
+                || first == "target"
+                || first == "external"
+                || first == "vendor"
+                || first == "node_modules"
+                || first == "packages"
+                || first == "models";
+        }
     } // namespace
 
 
@@ -158,8 +212,9 @@ namespace rose::tools
             .description =
                 "Recursively inventory an existing absolute directory without "
                 "opening file contents. The scan is bounded, does not follow "
-                "symbolic links, and reports relative paths, types, file sizes, "
-                "and extension counts. Use it to plan large-batch or whole-directory analysis.",
+                "symbolic links, and reports relative paths, Rose-grounded absolute "
+                "paths, types, file sizes, and extension counts. Use it to plan "
+                "large-batch or whole-directory analysis and targeted follow-up.",
             .risk = ToolRisk::ReadOnly,
             .consent = ToolConsent::RequiresConfirmation,
             .parameters = {
@@ -300,6 +355,9 @@ namespace rose::tools
                 *iterator;
 
             EntrySummary summary;
+            summary.absolutePath =
+                sanitizeSingleLine(
+                    entry.path().lexically_normal().string());
 
             std::error_code relativeError;
             summary.relativePath =
@@ -378,6 +436,32 @@ namespace rose::tools
             [](const EntrySummary& left,
                const EntrySummary& right)
             {
+                const std::size_t leftDepth =
+                    relativePathDepth(left.relativePath);
+                const std::size_t rightDepth =
+                    relativePathDepth(right.relativePath);
+
+                if (leftDepth != rightDepth)
+                {
+                    return leftDepth < rightDepth;
+                }
+
+                // The observation budget is intentionally much smaller than the
+                // scan budget. Put ordinary/project-owned paths before conventional
+                // generated trees so a bounded observation exposes useful grounded
+                // follow-up candidates instead of spending all of its bytes on
+                // .git/build/vendor metadata. Counts above still include everything
+                // that the bounded traversal visited.
+                const bool leftGenerated =
+                    conventionalGeneratedTree(left.relativePath);
+                const bool rightGenerated =
+                    conventionalGeneratedTree(right.relativePath);
+
+                if (leftGenerated != rightGenerated)
+                {
+                    return !leftGenerated;
+                }
+
                 return left.relativePath < right.relativePath;
             });
 
@@ -431,7 +515,9 @@ namespace rose::tools
                 << "\n["
                 << entry.type
                 << "] "
-                << entry.relativePath;
+                << entry.relativePath
+                << " | absolute_path="
+                << entry.absolutePath;
 
             if (entry.hasSize)
             {

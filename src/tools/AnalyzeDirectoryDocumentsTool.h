@@ -19,9 +19,9 @@ namespace rose::tools
         // One tool execution must fit inside the hidden routing model's context.
         // The tool therefore returns compact per-document excerpts instead of
         // dumping entire files into one prompt.
-        std::size_t maximumFilesPerBatch{ 20 };
-        std::size_t maximumObservationBytes{ 18u * 1024u };
-        std::size_t maximumExcerptBytesPerFile{ 900u };
+        std::size_t maximumFilesPerBatch{ 16 };
+        std::size_t maximumObservationBytes{ 10u * 1024u };
+        std::size_t maximumExcerptBytesPerFile{ 560u };
         std::size_t maximumDepth{ 8 };
         std::size_t maximumTextFileBytes{ 64u * 1024u };
         std::size_t maximumPdfBytes{ 64u * 1024u * 1024u };

@@ -579,6 +579,8 @@ add_executable(
     src/agent/CapabilityRoutingGuard.cpp
     src/agent/ToolSelectionAgent.h
     src/agent/ToolSelectionAgent.cpp
+    src/agent/UserTaskContinuation.h
+    src/agent/UserTaskContinuation.cpp
     src/agent/ToolObservation.h
     src/agent/ToolObservation.cpp
     src/agent/ToolCompletionAccumulator.h
@@ -587,6 +589,10 @@ add_executable(
     src/agent/ToolConfirmation.cpp
     src/agent/SourceWindowBinding.h
     src/agent/SourceWindowBinding.cpp
+    src/agent/CodingTaskWorkspace.h
+    src/agent/CodingTaskWorkspace.cpp
+    src/agent/CodingTaskPlan.h
+    src/agent/CodingTaskPlan.cpp
     src/agent/SourceRepairPlan.h
     src/agent/SourceRepairPlan.cpp
     src/agent/RepairValidationReplay.h
@@ -1141,6 +1147,29 @@ rose_enable_warnings(RoseProjectFileResolverTest)
 
 
 # =============================================================================
+# Bounded unresolved-user-task continuation unit test
+# =============================================================================
+
+add_executable(
+    RoseUserTaskContinuationTest
+
+    src/agent/AgentJournal.h
+    src/agent/UserTaskContinuation.h
+    src/agent/UserTaskContinuation.cpp
+    src/agent/UserTaskContinuation_test.cpp
+)
+
+target_include_directories(
+    RoseUserTaskContinuationTest
+    PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/src"
+)
+
+rose_configure_cpp20(RoseUserTaskContinuationTest)
+rose_enable_warnings(RoseUserTaskContinuationTest)
+
+
+# =============================================================================
 # Tool-selection parser unit test
 # =============================================================================
 #
@@ -1154,6 +1183,8 @@ add_executable(
     src/agent/AgentTypes.h
     src/agent/CapabilityRoutingGuard.h
     src/agent/CapabilityRoutingGuard.cpp
+    src/agent/CodingTaskPlan.h
+    src/agent/CodingTaskPlan.cpp
     src/agent/ToolSelectionAgent.h
     src/agent/ToolSelectionAgent.cpp
     src/agent/ToolSelectionAgent_test.cpp
@@ -1243,6 +1274,57 @@ target_include_directories(
 
 rose_configure_cpp20(RoseAgentExecutionTest)
 rose_enable_warnings(RoseAgentExecutionTest)
+
+
+# =============================================================================
+# Bounded multi-file coding workspace unit test
+# =============================================================================
+
+add_executable(
+    RoseCodingTaskWorkspaceTest
+
+    src/tools/ToolTypes.h
+    src/agent/CodingTaskWorkspace.h
+    src/agent/CodingTaskWorkspace.cpp
+    src/agent/SourceWindowBinding.h
+    src/agent/SourceWindowBinding.cpp
+    src/files/SourceWindowDigest.h
+    src/files/SourceWindowDigest.cpp
+    src/agent/CodingTaskWorkspace_test.cpp
+)
+
+target_include_directories(
+    RoseCodingTaskWorkspaceTest
+    PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/src"
+)
+
+rose_configure_cpp20(RoseCodingTaskWorkspaceTest)
+rose_enable_warnings(RoseCodingTaskWorkspaceTest)
+
+
+# =============================================================================
+# Explicit bounded multi-file coding plan unit test
+# =============================================================================
+
+add_executable(
+    RoseCodingTaskPlanTest
+
+    src/tools/ToolTypes.h
+    src/agent/CodingTaskWorkspace.h
+    src/agent/CodingTaskPlan.h
+    src/agent/CodingTaskPlan.cpp
+    src/agent/CodingTaskPlan_test.cpp
+)
+
+target_include_directories(
+    RoseCodingTaskPlanTest
+    PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/src"
+)
+
+rose_configure_cpp20(RoseCodingTaskPlanTest)
+rose_enable_warnings(RoseCodingTaskPlanTest)
 
 
 # =============================================================================
@@ -2028,9 +2110,12 @@ set(
     RoseBuildIdentityTest
     RoseContextSafeDocumentSynthesizerTest
     RoseProjectFileResolverTest
+    RoseUserTaskContinuationTest
     RoseToolSelectionAgentTest
     RoseToolCompletionTest
     RoseAgentExecutionTest
+    RoseCodingTaskWorkspaceTest
+    RoseCodingTaskPlanTest
     RoseContentPolicyTest
     RoseImageGenerationProfileTest
     RoseLocalImageModelPresetTest
@@ -2087,6 +2172,9 @@ add_custom_target(
         $<TARGET_FILE:RoseProjectFileResolverTest>
 
     COMMAND
+        $<TARGET_FILE:RoseUserTaskContinuationTest>
+
+    COMMAND
         $<TARGET_FILE:RoseToolSelectionAgentTest>
 
     COMMAND
@@ -2094,6 +2182,12 @@ add_custom_target(
 
     COMMAND
         $<TARGET_FILE:RoseAgentExecutionTest>
+
+    COMMAND
+        $<TARGET_FILE:RoseCodingTaskWorkspaceTest>
+
+    COMMAND
+        $<TARGET_FILE:RoseCodingTaskPlanTest>
 
     COMMAND
         $<TARGET_FILE:RoseContentPolicyTest>
@@ -2162,9 +2256,12 @@ add_custom_target(
         RoseBuildIdentityTest
         RoseContextSafeDocumentSynthesizerTest
         RoseProjectFileResolverTest
+        RoseUserTaskContinuationTest
         RoseToolSelectionAgentTest
         RoseToolCompletionTest
         RoseAgentExecutionTest
+        RoseCodingTaskWorkspaceTest
+        RoseCodingTaskPlanTest
         RoseContentPolicyTest
         RoseImageGenerationProfileTest
         RoseLocalImageModelPresetTest

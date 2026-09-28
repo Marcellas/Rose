@@ -10,15 +10,16 @@ namespace rose::tools
     struct ScanDirectoryTreeToolConfig
     {
         std::size_t maximumEntries{ 2000 };
-        std::size_t maximumOutputBytes{ 64u * 1024u };
+        std::size_t maximumOutputBytes{ 6u * 1024u };
         std::size_t maximumDepth{ 8 };
     };
 
 
     // Recursively inventories a directory without opening file contents.
-    // Symbolic links are listed but never traversed. The observation is bounded
-    // so very large trees can be discovered safely before a later batch-analysis
-    // pipeline decides which files are worth reading.
+    // Symbolic links are listed but never traversed. The model-facing observation is
+    // deliberately small enough to coexist with Rose's routing prompt; aggregate
+    // counts still cover the bounded scan even when individual entry lines are cut.
+    // This prevents recursive discovery from exhausting the local model context.
     class ScanDirectoryTreeTool final : public ITool
     {
     public:

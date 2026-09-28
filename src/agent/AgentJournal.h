@@ -39,7 +39,9 @@ namespace rose::agent
         RepairPlanned,
         RepairApplied,
         RepairValidated,
-        RepairValidationFailed
+        RepairValidationFailed,
+        CodingPlanRequired,
+        CodingPlanCreated
     };
 
 

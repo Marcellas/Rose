@@ -44,11 +44,22 @@ namespace rose::agent
         AgentDecision decide(
             std::string_view userText,
             std::string_view agentContext = {},
-            std::string_view trustedToolMetadata = {}) const;
+            std::string_view trustedToolMetadata = {},
+            std::string_view priorUserTaskContext = {}) const;
 
     private:
         [[nodiscard]]
         std::string buildSystemPrompt() const;
+
+        // Focused first path for explicit new text/source creation. The normal
+        // router carries the full tool catalog, while source creation may require a
+        // comparatively large synthesized file body. Keeping synthesis in this
+        // narrow prompt avoids spending the broad router's context window on code.
+        // The returned request still passes normal grounding/permission checks.
+        [[nodiscard]]
+        AgentDecision recoverTextCreationDecision(
+            std::string_view userText,
+            std::string_view priorUserTaskContext) const;
 
         [[nodiscard]]
         AgentDecision parseDecision(

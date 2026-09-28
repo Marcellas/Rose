@@ -1479,3 +1479,410 @@ rose_require_source_text(
     "unknown slash commands fail closed before model inference")
 
 message(STATUS "Rose Batch 48 runtime command-guard hotfix regression contract: PASS")
+
+
+# Batch 49 bounded multi-file coding workspace. Source-window provenance is no
+# longer limited to only the most recent read. Rose may retain a small bounded set
+# of validated windows across several files in one Agent run, while successful
+# edits invalidate only the mutated path before any later line-range patch.
+rose_require_source_text(
+    "src/agent/CodingTaskWorkspace.cpp"
+    "maximumRetainedSourceWindows"
+    "bounded multi-file source-window retention")
+
+rose_require_source_text(
+    "src/agent/CodingTaskWorkspace.cpp"
+    "invalidateSourceWindowsForPath"
+    "successful edits invalidate stale source provenance for that exact path")
+
+rose_require_source_text(
+    "src/agent/CodingTaskWorkspace.cpp"
+    "metadata_kind=coding_task_workspace"
+    "compact trusted multi-file coding scope metadata")
+
+rose_require_source_text(
+    "src/agent/AgentLoop.cpp"
+    "sourceWindowForRequest"
+    "AgentLoop selects retained provenance for the file currently being edited")
+
+rose_require_source_text(
+    "src/agent/AgentLoop.cpp"
+    "observeCodingMutation"
+    "AgentLoop updates multi-file provenance after completed source mutations")
+
+rose_require_source_text(
+    "src/agent/ToolSelectionAgent.cpp"
+    "metadata_kind=coding_task_workspace"
+    "control model understands retained multi-file source evidence without treating it as source contents")
+
+rose_require_source_text(
+    "CMakeLists.txt"
+    "RoseCodingTaskWorkspaceTest"
+    "bounded multi-file coding workspace unit test registration")
+
+message(STATUS "Rose Batch 49 bounded multi-file coding workspace regression contract: PASS")
+
+
+# Batch 50 explicit multi-file coding plans. Once Rose has observed multiple
+# source files, the first source mutation is blocked until the control model
+# produces one bounded, grounded advisory plan. The plan never grants execution
+# authority, but it is surfaced alongside the exact confirmation request.
+rose_require_source_text(
+    "src/agent/CodingTaskPlan.cpp"
+    "maximumCodingTaskPlanSteps"
+    "bounded multi-file coding plan size")
+
+rose_require_source_text(
+    "src/agent/CodingTaskPlan.cpp"
+    "authority=false"
+    "coding plan is explicitly non-authoritative")
+
+rose_require_source_text(
+    "src/agent/ToolSelectionAgent.cpp"
+    "ACTION=PLAN"
+    "control protocol supports one explicit coding-plan action")
+
+rose_require_source_text(
+    "src/agent/ToolSelectionAgent.cpp"
+    "Rejected coding plan containing an unregistered tool or ungrounded path."
+    "coding plan paths remain grounded and registered")
+
+rose_require_source_text(
+    "src/agent/AgentLoop.cpp"
+    "AgentEventType::CodingPlanRequired"
+    "multi-file writes are blocked until a review plan exists")
+
+rose_require_source_text(
+    "src/agent/AgentLoop.cpp"
+    "AgentEventType::CodingPlanCreated"
+    "accepted coding plans are visible in the black-box journal")
+
+rose_require_source_text(
+    "src/agent/FileAgentJournalStore.cpp"
+    "AgentEventType::CodingPlanCreated"
+    "persistent journal accepts appended Batch 50 coding-plan events")
+
+rose_require_source_text(
+    "src/agent/AgentLoop.cpp"
+    "formatCodingTaskPlanForConfirmation"
+    "coding plan is shown before an exact consequential action is confirmed")
+
+rose_require_source_text(
+    "CMakeLists.txt"
+    "RoseCodingTaskPlanTest"
+    "explicit multi-file coding plan unit test registration")
+
+message(STATUS "Rose Batch 50 explicit multi-file coding plan regression contract: PASS")
+
+# Batch 50 multi-turn source-creation hotfix. An unresolved tool-backed request
+# may carry only bounded USER-authored text into a nearby clarification turn.
+# Assistant prose never becomes authority. Source creation may synthesize a small
+# file body and one basename directly inside an explicitly user-grounded directory.
+rose_require_source_text(
+    "src/agent/UserTaskContinuation.cpp"
+    "maximumUserTaskContinuationTurns"
+    "bounded unresolved user-task continuation lifetime")
+
+rose_require_source_text(
+    "src/agent/AgentLoop.cpp"
+    "preserveUserTaskContinuation"
+    "AgentLoop exposes unresolved tool intent for nearby user clarification")
+
+rose_require_source_text(
+    "src/main.cpp"
+    "shouldReuseUserTaskContinuation"
+    "main reuses continuation only through bounded user-only state")
+
+rose_require_source_text(
+    "src/agent/ToolSelectionAgent.cpp"
+    "rose_prior_user_task_context"
+    "control routing distinguishes prior user authority from assistant/tool text")
+
+rose_require_source_text(
+    "src/agent/ToolSelectionAgent.cpp"
+    "parentDirectoryGroundedByUser"
+    "new text-file basename remains inside an explicitly user-grounded directory")
+
+rose_require_source_text(
+    "src/agent/ToolSelectionAgent.cpp"
+    "request.maxGeneratedTokens = 1536"
+    "focused source-file drafting receives a bounded generation budget")
+
+rose_require_source_text(
+    "CMakeLists.txt"
+    "RoseUserTaskContinuationTest"
+    "multi-turn user-task continuation unit test registration")
+
+message(STATUS "Rose Batch 50 multi-turn source-creation hotfix regression contract: PASS")
+
+# Batch 50 routing/confirmation hotfix. Confirm must resume a pending run instead
+# of falling through the unknown-slash guard; explicit existing directories must
+# route to directory analysis; and source creation gets one focused synthesis pass
+# when the broad control router incorrectly answers conversationally.
+rose_require_source_text(
+    "src/main.cpp"
+    "!confirmedAgentRun.has_value()"
+    "confirmed /confirm bypasses the unknown slash-command guard")
+
+rose_require_source_text(
+    "src/agent/CapabilityRoutingGuard.cpp"
+    "isExistingNonSymlinkDirectory"
+    "existing directory paths are classified before exact-file recovery")
+
+rose_require_source_text(
+    "src/agent/CapabilityRoutingGuard.cpp"
+    "An existing directory must never fall through to an exact-file reader."
+    "directory paths fail closed instead of reaching read_text_file")
+
+rose_require_source_text(
+    "src/agent/ToolSelectionAgent.cpp"
+    "Focused create_text_file draft output:"
+    "explicit source creation uses a focused drafting pass")
+
+rose_require_source_text(
+    "src/agent/CapabilityRoutingGuard.cpp"
+    "The registered capability contract is authoritative: do NOT tell"
+    "final conversational fallback cannot deny a registered capability")
+
+message(STATUS "Rose Batch 50 routing/confirmation hotfix regression contract: PASS")
+
+
+# Batch 50 routing/context hotfix 3. Source creation drafts before the all-tools
+# router so a large generation reservation cannot overflow the 8K local context.
+# Unquoted Windows paths followed by prose preserve the deepest existing path,
+# while large directory evidence skips a redundant routing pass and sheds the
+# capability catalog before final user-facing synthesis.
+rose_require_source_text(
+    "src/agent/ToolSelectionAgent.cpp"
+    "Source creation gets the small focused prompt FIRST."
+    "source creation drafts before broad tool routing")
+
+rose_require_source_text(
+    "src/agent/ToolSelectionAgent.cpp"
+    "CONTENT_BEGIN"
+    "focused source drafting supports multiline file contents")
+
+rose_require_source_text(
+    "src/agent/CapabilityRoutingGuard.cpp"
+    "Remove one character, not one word."
+    "unquoted existing paths followed by prose preserve the deepest path")
+
+rose_require_source_text(
+    "src/agent/AgentLoop.cpp"
+    "toolCompletesWithFinalSynthesis"
+    "large terminal directory analysis bypasses redundant control rerouting")
+
+rose_require_source_text(
+    "src/agent/AgentLoop.cpp"
+    "finalResponseTransientContext"
+    "final synthesis drops the redundant full capability contract after real tool execution")
+
+rose_require_source_text(
+    "src/tools/AnalyzeDirectoryDocumentsTool.h"
+    "maximumObservationBytes{ 10u * 1024u }"
+    "directory evidence remains inside a conservative final-context budget")
+
+message(STATUS "Rose Batch 50 routing/context hotfix 3 regression contract: PASS")
+
+
+# Batch 50 routing/context hotfix 4. Existing-prefix recovery for unquoted Windows
+# paths must stop only at a real prompt boundary. Otherwise an intentionally
+# nonexistent exact-file path can collapse to an existing parent/root directory
+# and be misrouted as directory analysis before source-window arguments survive.
+rose_require_source_text(
+    "src/agent/CapabilityRoutingGuard.cpp"
+    "promptBoundaryAfterPathPrefix"
+    "existing Windows path-prefix recovery requires a prompt boundary")
+
+rose_require_source_text(
+    "src/agent/CapabilityRoutingGuard.cpp"
+    "an exact-file request into a directory request on Windows."
+    "nonexistent exact-file paths cannot collapse to an existing parent/root")
+
+rose_require_source_text(
+    "src/agent/ToolSelectionAgent_test.cpp"
+    "preserve the exact nonexistent file path and explicit source-window line arguments"
+    "deterministic source-window recovery retains exact path and line metadata")
+
+message(STATUS "Rose Batch 50 routing/context hotfix 4 regression contract: PASS")
+
+
+# Batch 51. Software-project directory diagnosis must remain a multi-step coding
+# workflow instead of being collapsed into the terminal document-batch analyzer.
+# Directory discovery also publishes Rose-grounded absolute child paths so later
+# reads/scans can stay within the confirmed project tree without model invention.
+rose_require_source_text(
+    "src/agent/CapabilityRoutingGuard.cpp"
+    "looksLikeDevelopmentProjectDirectory"
+    "software project roots are detected separately from document corpora")
+
+rose_require_source_text(
+    "src/agent/CapabilityRoutingGuard.cpp"
+    "A software project is not a document corpus."
+    "project diagnosis begins with bounded root discovery")
+
+rose_require_source_text(
+    "src/agent/ToolSelectionAgent.cpp"
+    "toolUsesPathKindCanonicalization"
+    "path-type canonicalization does not overwrite legitimate later project discovery steps")
+
+rose_require_source_text(
+    "src/tools/ListDirectoryTool.cpp"
+    "| absolute_path="
+    "immediate directory discovery publishes grounded child paths")
+
+rose_require_source_text(
+    "src/tools/ScanDirectoryTreeTool.cpp"
+    "| absolute_path="
+    "recursive inventory publishes grounded child paths")
+
+rose_require_source_text(
+    "src/agent/ToolSelectionAgent_test.cpp"
+    "completed bounded project inventory must return control to the multi-step agent"
+    "project discovery cannot fall through into terminal document analysis")
+
+rose_require_source_text(
+    "src/agent/ToolSelectionAgent_test.cpp"
+    "a Rose-grounded child discovered under a project root must remain targetable"
+    "project child reads survive root-directory canonicalization")
+
+message(STATUS "Rose Batch 51 project-diagnosis discovery regression contract: PASS")
+
+
+# Batch 52. Hidden tool routing must fit the configured local context as Rose's
+# registry grows. ToolSelectionAgent already owns ToolRegistry, so the full prose
+# capability contract is projected out of the routing copy while real observations
+# remain available for grounding. The system prompt carries compact cross-tool
+# invariants plus descriptor/schema rows instead of duplicating per-tool manuals.
+rose_require_source_text(
+    "src/agent/ToolSelectionAgent.cpp"
+    "The original agentContext remains intact for path grounding"
+    "control-context projection removes duplicate capability prose without weakening grounding")
+
+rose_require_source_text(
+    "src/agent/ToolSelectionAgent.cpp"
+    "Registered tools (descriptor text is authoritative):"
+    "hidden router uses a compact descriptor-driven capability catalog")
+
+rose_require_source_text(
+    "src/agent/ToolSelectionAgent_test.cpp"
+    "CAPABILITY_CONTRACT_SENTINEL_SHOULD_NOT_REACH_ROUTER"
+    "routing projection is regression-tested against capability-contract duplication")
+
+rose_require_source_text(
+    "src/agent/CapabilityRoutingGuard.cpp"
+    "one bounded recursive inventory is a safe deterministic continuation"
+    "project diagnosis has a read-only scan fallback when the model still responds early")
+
+rose_require_source_text(
+    "src/agent/ToolSelectionAgent_test.cpp"
+    "a project diagnosis that still lacks evidence should have one bounded recursive discovery fallback"
+    "project diagnosis fallback remains bounded and deterministic")
+
+message(STATUS "Rose Batch 52 bounded control-routing regression contract: PASS")
+
+
+# Batch 53. Read-only project diagnosis must not stall when a small local model
+# wraps one grounded read in ACTION=PLAN. Recursive discovery must also fit beside
+# the hidden router/final synthesis prompt instead of consuming the entire 8K model
+# context with generated-tree paths.
+rose_require_source_text(
+    "src/agent/ToolSelectionAgent.cpp"
+    "Recovered a single read_text_file action that the control model wrapped in ACTION=PLAN."
+    "single read-only plan misuse is recovered as the direct grounded read action")
+
+rose_require_source_text(
+    "src/agent/ToolSelectionAgent.cpp"
+    "Never use PLAN merely to request one read-only action"
+    "hidden router explicitly reserves PLAN for mutation-bearing coding plans")
+
+rose_require_source_text(
+    "src/tools/ScanDirectoryTreeTool.h"
+    "std::size_t maximumOutputBytes"
+    "recursive discovery exposes a bounded output budget for local model context")
+
+rose_require_source_text(
+    "src/tools/ScanDirectoryTreeTool.cpp"
+    "conventionalGeneratedTree"
+    "bounded recursive discovery prioritizes useful paths before generated trees")
+
+rose_require_source_text(
+    "src/agent/ToolSelectionAgent_test.cpp"
+    "a one-step read-only PLAN should recover as the grounded read_text_file action instead of stalling diagnosis"
+    "read-only plan recovery is regression-tested")
+
+rose_require_source_text(
+    "src/tools/FilesystemTools_test.cpp"
+    "default scan observation must stay near the 8 KiB model-context budget"
+    "default recursive discovery is regression-tested against context blowout")
+
+message(STATUS "Rose Batch 53 bounded discovery continuation regression contract: PASS")
+
+
+# Batch 54. Preserve exact read bounds when a small local model packs optional
+# read_text_file arguments into a one-step PLAN note. Duplicate read-only actions
+# receive one bounded re-route instead of immediately ending a broad diagnosis,
+# and recursive discovery subsumes a later deterministic root listing.
+rose_require_source_text(
+    "src/agent/ToolSelectionAgent.cpp"
+    "start_line=1;line_count=20"
+    "semicolon-packed read-only PLAN shorthand is recognized")
+
+rose_require_source_text(
+    "src/agent/ToolSelectionAgent.cpp"
+    "while preserving documented read bounds"
+    "one-step read-only PLAN recovery keeps source-window arguments")
+
+rose_require_source_text(
+    "src/agent/AgentLoop.cpp"
+    "repeated_read_only_tool_request"
+    "duplicate read-only actions receive one bounded control re-check")
+
+rose_require_source_text(
+    "src/agent/AgentLoop.cpp"
+    "completedRecursiveScanCoversListing"
+    "recursive discovery prevents a redundant deterministic root listing")
+
+rose_require_source_text(
+    "src/agent/AgentLoop.cpp"
+    "reason=overlapping_text_read"
+    "overlapping source-window reads receive one bounded non-overlap re-route")
+
+rose_require_source_text(
+    "src/tools/ScanDirectoryTreeTool.h"
+    "maximumOutputBytes{ 6u * 1024u }"
+    "recursive discovery leaves additional context headroom for follow-up reads")
+
+message(STATUS "Rose Batch 54R bounded read-only continuation regression contract: PASS")
+
+
+# Batch 55. A broad software-project diagnosis should progress from bounded
+# discovery to confirmation-gated validation instead of stopping with generic
+# possibilities. A successful configured build may be followed by CTest, while a
+# failed build remains available for the existing diagnostic-source recovery path.
+rose_require_source_text(
+    "src/agent/CapabilityRoutingGuard.cpp"
+    "projectDiagnosisIntent"
+    "broad project diagnosis has an explicit deterministic intent classifier")
+
+rose_require_source_text(
+    "src/agent/CapabilityRoutingGuard.cpp"
+    "diagnosisBuildIntent"
+    "project diagnosis can propose a configured build after read-only discovery")
+
+rose_require_source_text(
+    "src/agent/CapabilityRoutingGuard.cpp"
+    "latestToolObservationSuccess"
+    "diagnostic validation continuation uses Rose-owned tool-success evidence")
+
+rose_require_source_text(
+    "src/agent/CapabilityRoutingGuard.cpp"
+    "diagnosisTestIntent"
+    "successful diagnostic builds can continue to registered CTest validation")
+
+rose_require_source_text(
+    "src/agent/AgentLoop.cpp"
+    "directRequestIsRedundantListing"
+    "failed validation diagnostics are not masked by redundant root-list recovery")
+
+message(STATUS "Rose Batch 55 project validation continuation regression contract: PASS")

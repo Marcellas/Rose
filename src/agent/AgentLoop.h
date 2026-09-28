@@ -1,6 +1,9 @@
 #pragma once
 
 #include "agent/ToolCompletionAccumulator.h"
+#include "agent/UserTaskContinuation.h"
+#include "agent/CodingTaskWorkspace.h"
+#include "agent/CodingTaskPlan.h"
 #include "agent/RepairValidationReplay.h"
 #include "agent/RepairOutcomeTracker.h"
 #include "agent/ToolConfirmation.h"
@@ -51,6 +54,10 @@ namespace rose::agent
         std::string originalUserText;
         std::string transientContext;
 
+        // Verbatim earlier user messages from one unresolved tool-backed task.
+        // This is user authority only; assistant prose is never stored here.
+        std::string priorUserTaskContext;
+
         // Latest Rose-owned structured metadata from a completed tool. This is
         // kept separate from ordinary transientContext so untrusted tool/file
         // output cannot spoof routing metadata by printing internal tag text.
@@ -66,6 +73,17 @@ namespace rose::agent
         // This remains typed and ephemeral; source contents themselves stay in
         // transientContext as untrusted evidence. A later unrelated tool clears it.
         std::optional<tools::SourceWindowEvidence> latestSourceWindowEvidence{};
+
+        // Bounded multi-file coding workspace. Unlike latestSourceWindowEvidence,
+        // this can retain Rose-owned preimage evidence for several source files at
+        // once. Successful edits invalidate only that path, so an edit to Foo.h
+        // does not discard an already-observed Foo.cpp window.
+        CodingTaskWorkspaceState codingTaskWorkspace{};
+
+        // Optional human-reviewable multi-file coding plan produced after read-only
+        // discovery and before the first write. This plan is advisory only; exact
+        // ToolRequests still own execution authority and confirmation semantics.
+        std::optional<CodingTaskPlan> codingTaskPlan{};
 
         // Exact failed configure/build/test request retained only long enough to validate a
         // provenance-bound source repair. The replay becomes eligible only after
@@ -127,6 +145,12 @@ namespace rose::agent
 
         std::size_t totalExecutedTools{ 0 };
         bool reachedToolLimit{ false };
+
+        // When a tool-like request could not yet be executed because information
+        // is still missing, main() may carry this bounded USER-ONLY context into
+        // a nearby clarification turn. It is never persistent memory.
+        bool preserveUserTaskContinuation{ false };
+        std::string userTaskContinuationContext;
     };
 
 
@@ -163,7 +187,8 @@ namespace rose::agent
         AgentLoopResult start(
             std::string userText,
             std::string initialTransientContext = {},
-            AgentRunProvenance provenance = {});
+            AgentRunProvenance provenance = {},
+            std::string priorUserTaskContext = {});
 
         // Resume after the user explicitly confirms the exact pending request.
         [[nodiscard]]

@@ -6,6 +6,7 @@
 #include "tools/ITool.h"
 #include "tools/ToolRegistry.h"
 
+#include <algorithm>
 #include <array>
 #include <cstdlib>
 #include <filesystem>
@@ -15,6 +16,7 @@
 #include <string>
 #include <string_view>
 #include <utility>
+#include <vector>
 
 namespace
 {
@@ -87,6 +89,51 @@ namespace
     };
 
 
+    class DirectoryRecoveryFixture final
+    {
+    public:
+        DirectoryRecoveryFixture()
+        {
+#ifdef _WIN32
+            path_ =
+                std::filesystem::temp_directory_path()
+                / "Rose Tool Selection Agent Project Recovery";
+#else
+            path_ =
+                std::filesystem::path{
+                    R"(C:\Rose Tool Selection Agent Project Recovery)"
+                };
+#endif
+
+            std::error_code error;
+            std::filesystem::remove_all(path_, error);
+            error.clear();
+            std::filesystem::create_directories(path_, error);
+            require(!error, "directory recovery fixture must be creatable");
+
+            std::ofstream{ path_ / "sample.cpp" }
+                << "int main() { return 0; }\n";
+        }
+
+
+        ~DirectoryRecoveryFixture()
+        {
+            std::error_code ignored;
+            std::filesystem::remove_all(path_, ignored);
+        }
+
+
+        [[nodiscard]]
+        std::string requestPath() const
+        {
+            return path_.string();
+        }
+
+    private:
+        std::filesystem::path path_;
+    };
+
+
     class FixedResponseModelProvider final
         : public rose::model::IModelProvider
     {
@@ -121,6 +168,111 @@ namespace
 
     private:
         std::string response_;
+    };
+
+
+    class CapturingResponseModelProvider final
+        : public rose::model::IModelProvider
+    {
+    public:
+        explicit CapturingResponseModelProvider(
+            std::string response)
+            : response_{ std::move(response) }
+        {
+        }
+
+
+        [[nodiscard]]
+        rose::model::ModelResponse generate(
+            const rose::model::ModelRequest& request) override
+        {
+            lastRequest_ = request;
+
+            return rose::model::ModelResponse{
+                .text = response_,
+                .reasoning = {},
+                .generatedTokens = 0,
+                .finishReason =
+                    rose::model::ModelFinishReason::EndOfGeneration
+            };
+        }
+
+
+        [[nodiscard]]
+        rose::model::ModelContextUsage inspectContext(
+            const rose::model::ModelRequest&) const override
+        {
+            return {};
+        }
+
+
+        [[nodiscard]]
+        const rose::model::ModelRequest& lastRequest() const noexcept
+        {
+            return lastRequest_;
+        }
+
+    private:
+        std::string response_;
+        rose::model::ModelRequest lastRequest_;
+    };
+
+
+    class SequencedResponseModelProvider final
+        : public rose::model::IModelProvider
+    {
+    public:
+        explicit SequencedResponseModelProvider(
+            std::vector<std::string> responses)
+            : responses_{ std::move(responses) }
+        {
+            require(
+                !responses_.empty(),
+                "sequenced response provider requires at least one response");
+        }
+
+
+        [[nodiscard]]
+        rose::model::ModelResponse generate(
+            const rose::model::ModelRequest&) override
+        {
+            const std::size_t selected =
+                (std::min)(
+                    nextResponse_,
+                    responses_.size() - 1u);
+
+            if (nextResponse_ < responses_.size())
+            {
+                ++nextResponse_;
+            }
+
+            return rose::model::ModelResponse{
+                .text = responses_[selected],
+                .reasoning = {},
+                .generatedTokens = 0,
+                .finishReason =
+                    rose::model::ModelFinishReason::EndOfGeneration
+            };
+        }
+
+
+        [[nodiscard]]
+        rose::model::ModelContextUsage inspectContext(
+            const rose::model::ModelRequest&) const override
+        {
+            return {};
+        }
+
+
+        [[nodiscard]]
+        std::size_t generationCount() const noexcept
+        {
+            return nextResponse_;
+        }
+
+    private:
+        std::vector<std::string> responses_;
+        std::size_t nextResponse_{ 0 };
     };
 
 
@@ -797,6 +949,9 @@ int main()
     {
         rose::tools::ToolRegistry registry;
         registry.registerTool(std::make_unique<PathDummyTool>("read_text_file"));
+        registry.registerTool(std::make_unique<PathDummyTool>("list_directory"));
+        registry.registerTool(std::make_unique<PathDummyTool>("scan_directory_tree"));
+        registry.registerTool(std::make_unique<PathDummyTool>("analyze_directory_documents"));
         registry.registerTool(std::make_unique<PathDummyTool>("read_pdf"));
         registry.registerTool(std::make_unique<PathDummyTool>("read_office_document"));
         registry.registerTool(std::make_unique<PathDummyTool>("inspect_image"));
@@ -818,9 +973,11 @@ int main()
         require(
             sourceWindow.has_value()
                 && sourceWindow->toolId == "read_text_file"
+                && sourceWindow->arguments.at("path")
+                    == "C:\\Docs\\large-source.cpp"
                 && sourceWindow->arguments.at("start_line") == "2498"
                 && sourceWindow->arguments.at("line_count") == "5",
-            "deterministic text recovery must preserve explicit source-window line arguments");
+            "deterministic text recovery must preserve the exact nonexistent file path and explicit source-window line arguments");
 
         const std::string trustedFailureMetadata =
             "metadata_kind=source_diagnostic\n"
@@ -926,6 +1083,131 @@ int main()
             require(
                 buildOnlyDecision.action == AgentAction::RespondNormally,
                 "model-selected diagnostic reads must be rejected when the original request did not authorize repair/debug follow-up");
+        }
+
+        DirectoryRecoveryFixture directoryFixture;
+        const std::string quotedDirectoryPath =
+            "\"" + directoryFixture.requestPath() + "\"";
+
+        const auto directoryAnalysis =
+            rose::agent::CapabilityRoutingGuard::recoverDirectToolRequest(
+                "Analyze " + quotedDirectoryPath
+                    + " and plan an improvement to the code.",
+                registry,
+                {});
+        require(
+            directoryAnalysis.has_value()
+                && directoryAnalysis->toolId == "list_directory"
+                && directoryAnalysis->arguments.at("path")
+                    == directoryFixture.requestPath(),
+            "a source-project directory must begin with bounded project discovery instead of terminal document-batch analysis");
+
+        const std::array<std::string_view, 1> completedProjectDiscovery{
+            "list_directory"
+        };
+        const auto afterProjectDiscovery =
+            rose::agent::CapabilityRoutingGuard::recoverDirectToolRequest(
+                "Analyze " + quotedDirectoryPath
+                    + " and plan an improvement to the code.",
+                registry,
+                completedProjectDiscovery);
+        require(
+            afterProjectDiscovery.has_value()
+                && afterProjectDiscovery->toolId == "scan_directory_tree"
+                && afterProjectDiscovery->arguments.at("path")
+                    == directoryFixture.requestPath()
+                && afterProjectDiscovery->arguments.at("max_depth") == "2",
+            "a project diagnosis that still lacks evidence should have one bounded recursive discovery fallback after the root listing");
+
+        const std::array<std::string_view, 2> completedProjectInventory{
+            "list_directory",
+            "scan_directory_tree"
+        };
+        const auto afterProjectInventory =
+            rose::agent::CapabilityRoutingGuard::recoverDirectToolRequest(
+                "Analyze " + quotedDirectoryPath
+                    + " and plan an improvement to the code.",
+                registry,
+                completedProjectInventory);
+        require(
+            !afterProjectInventory.has_value(),
+            "completed bounded project inventory must return control to the multi-step agent instead of falling into terminal document analysis");
+
+#ifdef _WIN32
+        const auto unquotedDirectoryAnalysis =
+            rose::agent::CapabilityRoutingGuard::recoverDirectToolRequest(
+                "Analyze " + directoryFixture.requestPath()
+                    + " and figure out what is going wrong.",
+                registry,
+                {});
+        require(
+            unquotedDirectoryAnalysis.has_value()
+                && unquotedDirectoryAnalysis->toolId == "list_directory"
+                && unquotedDirectoryAnalysis->arguments.at("path")
+                    == directoryFixture.requestPath(),
+            "unquoted existing Windows project directory followed by prose must preserve the deepest exact directory and start project discovery");
+#endif
+
+        {
+            FixedResponseModelProvider provider{
+                "ACTION=TOOL\n"
+                "TOOL=read_text_file\n"
+                "ARG path=" + directoryFixture.requestPath() + "\n"
+                "END\n"
+            };
+            rose::logging::Logger logger{
+                rose::logging::LoggerConfig{ .mode = rose::logging::LogMode::Silent }
+            };
+            rose::agent::ToolSelectionAgent agent{ provider, registry, logger };
+
+            const auto canonicalDirectoryDecision =
+                agent.decide(
+                    "Analyze " + quotedDirectoryPath
+                        + " and plan an improvement to the code.");
+
+            require(
+                canonicalDirectoryDecision.action == AgentAction::InvokeTool
+                    && canonicalDirectoryDecision.toolRequest.has_value()
+                    && canonicalDirectoryDecision.toolRequest->toolId
+                        == "list_directory",
+                "model-selected read_text_file(project-directory) must be canonicalized to bounded project discovery");
+        }
+
+        {
+            const std::filesystem::path childPath =
+                std::filesystem::path{ directoryFixture.requestPath() }
+                / "sample.cpp";
+
+            FixedResponseModelProvider provider{
+                "ACTION=TOOL\n"
+                "TOOL=read_text_file\n"
+                "ARG path=" + childPath.string() + "\n"
+                "END\n"
+            };
+            rose::logging::Logger logger{
+                rose::logging::LoggerConfig{ .mode = rose::logging::LogMode::Silent }
+            };
+            rose::agent::ToolSelectionAgent agent{ provider, registry, logger };
+
+            const std::string listingContext =
+                "Listed directory: " + directoryFixture.requestPath() + "\n"
+                "<rose_untrusted_directory_listing>\n"
+                "[FILE] sample.cpp | absolute_path=" + childPath.string() + " | bytes=25\n"
+                "</rose_untrusted_directory_listing>\n";
+
+            const auto childRead =
+                agent.decide(
+                    "Analyze " + quotedDirectoryPath
+                        + " and plan an improvement to the code.",
+                    listingContext);
+
+            require(
+                childRead.action == AgentAction::InvokeTool
+                    && childRead.toolRequest.has_value()
+                    && childRead.toolRequest->toolId == "read_text_file"
+                    && childRead.toolRequest->arguments.at("path")
+                        == childPath.string(),
+                "a Rose-grounded child discovered under a project root must remain targetable instead of being canonicalized back to the root directory");
         }
 
         const auto pdf = rose::agent::CapabilityRoutingGuard::recoverDirectToolRequest(
@@ -2181,6 +2463,375 @@ int main()
             "test explanations and explicit no-test requests must never execute CTest");
     }
 
+
+    // Batch 50: a small multi-file coding plan is a separate bounded control
+    // action. Every planned path must already be grounded, and the plan itself
+    // never becomes a ToolRequest.
+    {
+        FixedResponseModelProvider provider{
+            "ACTION=PLAN\n"
+            "PLAN_STEP=read_text_file|C:\\Rose\\src\\Example.h|Inspect the declaration\n"
+            "PLAN_STEP=edit_text_file|C:\\Rose\\src\\Example.h|Update the declaration\n"
+            "PLAN_STEP=edit_text_file|C:\\Rose\\src\\Example.cpp|Update the implementation\n"
+            "PLAN_STEP=build_cmake_project|C:\\Rose|Build the Rose target\n"
+            "END\n"
+        };
+
+        rose::tools::ToolRegistry registry;
+        registry.registerTool(std::make_unique<PathDummyTool>("read_text_file"));
+        registry.registerTool(std::make_unique<TextMutationDummyTool>("edit_text_file"));
+        registry.registerTool(std::make_unique<CMakeBuildDummyTool>());
+
+        rose::logging::Logger logger{
+            rose::logging::LoggerConfig{ .mode = rose::logging::LogMode::Silent }
+        };
+
+        rose::agent::ToolSelectionAgent agent{ provider, registry, logger };
+        const auto decision = agent.decide(
+            "Update C:\\Rose\\src\\Example.h and C:\\Rose\\src\\Example.cpp, then build C:\\Rose.");
+
+        require(
+            decision.action == AgentAction::PlanCodingTask
+                && decision.codingTaskPlan.has_value()
+                && !decision.toolRequest.has_value()
+                && decision.codingTaskPlan->steps.size() == 4,
+            "grounded multi-file ACTION=PLAN should produce an advisory coding plan rather than a tool request");
+    }
+
+    {
+        FixedResponseModelProvider provider{
+            "ACTION=PLAN\n"
+            "PLAN_STEP=edit_text_file|C:\\Other\\Invented.cpp|Edit invented file\n"
+            "PLAN_STEP=build_cmake_project|C:\\Rose|Build Rose\n"
+            "END\n"
+        };
+
+        rose::tools::ToolRegistry registry;
+        registry.registerTool(std::make_unique<TextMutationDummyTool>("edit_text_file"));
+        registry.registerTool(std::make_unique<CMakeBuildDummyTool>());
+
+        rose::logging::Logger logger{
+            rose::logging::LoggerConfig{ .mode = rose::logging::LogMode::Silent }
+        };
+
+        rose::agent::ToolSelectionAgent agent{ provider, registry, logger };
+        const auto decision = agent.decide(
+            "Update C:\\Rose\\src\\Example.cpp and build C:\\Rose.");
+
+        require(
+            decision.action == AgentAction::RespondNormally
+                && !decision.codingTaskPlan.has_value(),
+            "coding plan must reject model-invented filesystem paths even though plans are non-executing");
+    }
+
+
+
+    {
+        // The hidden router already has direct access to ToolRegistry. AgentLoop's
+        // full prose capability contract is useful to the final conversational
+        // model but must not be duplicated into the control prompt. Preserve the
+        // actual tool observation so discovered paths remain grounded.
+        CapturingResponseModelProvider provider{
+            "ACTION=TOOL\n"
+            "TOOL=scan_directory_tree\n"
+            "ARG path=C:\\Rose\n"
+            "END\n"
+        };
+
+        rose::tools::ToolRegistry registry;
+        registry.registerTool(std::make_unique<PathDummyTool>("list_directory"));
+        registry.registerTool(std::make_unique<PathDummyTool>("scan_directory_tree"));
+        registry.registerTool(std::make_unique<PathDummyTool>("read_text_file"));
+
+        rose::logging::Logger logger{
+            rose::logging::LoggerConfig{ .mode = rose::logging::LogMode::Silent }
+        };
+        rose::agent::ToolSelectionAgent agent{ provider, registry, logger };
+
+        const std::string context =
+            "<rose_capability_contract>\n"
+            "CAPABILITY_CONTRACT_SENTINEL_SHOULD_NOT_REACH_ROUTER\n"
+            "</rose_capability_contract>\n\n"
+            "<rose_tool_observation>\n"
+            "tool_id=list_directory\n"
+            "success=true\n"
+            "[DIR] src | absolute_path=C:\\Rose\\src\n"
+            "argument_name=path\n"
+            "argument_value_begin\n"
+            "C:\\Rose\n"
+            "argument_value_end\n"
+            "</rose_tool_observation>";
+
+        const auto decision = agent.decide(
+            "Continue diagnosing the project.",
+            context);
+
+        const auto& request = provider.lastRequest();
+        require(
+            request.messages.size() == 2,
+            "routing projection test must capture one system and one user control message");
+        require(
+            request.messages[1].content.find(
+                "CAPABILITY_CONTRACT_SENTINEL_SHOULD_NOT_REACH_ROUTER")
+                == std::string::npos,
+            "control routing prompt must strip the duplicated full capability contract");
+        require(
+            request.messages[1].content.find("<rose_tool_observation>")
+                != std::string::npos
+                && request.messages[1].content.find("C:\\Rose\\src")
+                    != std::string::npos,
+            "control routing projection must preserve tool observations and discovered path evidence");
+        require(
+            decision.action == AgentAction::InvokeTool
+                && decision.toolRequest.has_value()
+                && decision.toolRequest->toolId == "scan_directory_tree"
+                && decision.toolRequest->arguments.at("path") == "C:\\Rose",
+            "routing projection must not weaken path grounding against the original unprojected agent context");
+    }
+
+
+    {
+        // A read-only project diagnosis should not stall when a small local model
+        // wraps one targeted file read in ACTION=PLAN. A one-read "plan" is not a
+        // real coding plan, so Rose safely recovers it as the direct read tool and
+        // still applies ordinary path grounding.
+        FixedResponseModelProvider provider{
+            "ACTION=PLAN\n"
+            "PLAN_STEP=read_text_file|C:\\Rose\\CMakeLists.txt|short reason=Read project configuration\n"
+            "END\n"
+        };
+
+        rose::tools::ToolRegistry registry;
+        registry.registerTool(std::make_unique<PathDummyTool>("read_text_file"));
+        rose::logging::Logger logger{
+            rose::logging::LoggerConfig{ .mode = rose::logging::LogMode::Silent }
+        };
+        rose::agent::ToolSelectionAgent agent{ provider, registry, logger };
+
+        const std::string context =
+            "<rose_tool_observation>\n"
+            "tool_id=list_directory\n"
+            "success=true\n"
+            "[FILE] CMakeLists.txt | absolute_path=C:\\Rose\\CMakeLists.txt | bytes=69480\n"
+            "</rose_tool_observation>";
+
+        const auto decision = agent.decide(
+            "Analyze C:\\Rose and figure out what is going wrong.",
+            context);
+
+        require(
+            decision.action == AgentAction::InvokeTool
+                && decision.toolRequest.has_value()
+                && decision.toolRequest->toolId == "read_text_file"
+                && decision.toolRequest->arguments.at("path")
+                    == "C:\\Rose\\CMakeLists.txt",
+            "a one-step read-only PLAN should recover as the grounded read_text_file action instead of stalling diagnosis");
+    }
+
+
+    {
+        // Qwen may also stuff read_text_file's optional source-window arguments
+        // into PLAN_STEP pipe fields. Recover only the documented read arguments;
+        // unknown fields still fail closed.
+        FixedResponseModelProvider provider{
+            "ACTION=PLAN\n"
+            "PLAN_STEP=read_text_file|C:\\Rose\\CMakeLists.txt|start_line=1|line_count=20\n"
+            "END\n"
+        };
+
+        rose::tools::ToolRegistry registry;
+        registry.registerTool(std::make_unique<PathDummyTool>("read_text_file"));
+        rose::logging::Logger logger{
+            rose::logging::LoggerConfig{ .mode = rose::logging::LogMode::Silent }
+        };
+        rose::agent::ToolSelectionAgent agent{ provider, registry, logger };
+
+        const std::string context =
+            "<rose_tool_observation>\n"
+            "tool_id=list_directory\n"
+            "success=true\n"
+            "[FILE] CMakeLists.txt | absolute_path=C:\\Rose\\CMakeLists.txt | bytes=69480\n"
+            "</rose_tool_observation>";
+
+        const auto decision = agent.decide(
+            "Analyze C:\\Rose and figure out what is going wrong.",
+            context);
+
+        require(
+            decision.action == AgentAction::InvokeTool
+                && decision.toolRequest.has_value()
+                && decision.toolRequest->toolId == "read_text_file"
+                && decision.toolRequest->arguments.at("path")
+                    == "C:\\Rose\\CMakeLists.txt"
+                && decision.toolRequest->arguments.at("start_line") == "1"
+                && decision.toolRequest->arguments.at("line_count") == "20",
+            "read-only PLAN recovery should preserve documented read_text_file source-window arguments");
+    }
+
+
+    {
+        // Explicit source creation uses the focused drafting prompt BEFORE the
+        // large all-tools router. The focused format carries multiline source as
+        // a bounded content block rather than forcing code through one ARG line.
+        SequencedResponseModelProvider provider{
+            {
+                "PATH=C:\\Users\\chris\\OneDrive\\Desktop\\airspeed_calculator.cpp\n"
+                "CONTENT_BEGIN\n"
+                "#include <iostream>\n"
+                "int main() {\n"
+                "    std::cout << \"airspeed\" << '\\n';\n"
+                "    return 0;\n"
+                "}\n"
+                "CONTENT_END\n"
+            }
+        };
+
+        rose::tools::ToolRegistry registry;
+        registry.registerTool(
+            std::make_unique<TextMutationDummyTool>("create_text_file"));
+        rose::logging::Logger logger{
+            rose::logging::LoggerConfig{ .mode = rose::logging::LogMode::Silent }
+        };
+        rose::agent::ToolSelectionAgent agent{ provider, registry, logger };
+
+        const auto decision = agent.decide(
+            "Create a .cpp source file at C:\\Users\\chris\\OneDrive\\Desktop "
+            "and design an airspeed program.");
+
+        require(
+            provider.generationCount() == 1
+                && decision.action == AgentAction::InvokeTool
+                && decision.toolRequest.has_value()
+                && decision.toolRequest->toolId == "create_text_file"
+                && decision.toolRequest->arguments.at("path")
+                    == "C:\\Users\\chris\\OneDrive\\Desktop\\airspeed_calculator.cpp"
+                && decision.toolRequest->arguments.at("content").find("int main()")
+                    != std::string::npos
+                && decision.toolRequest->arguments.at("content").find('\n')
+                    != std::string::npos,
+            "explicit source creation should use one focused multiline draft instead of exhausting the broad router context");
+    }
+
+
+    {
+        // Multi-turn source creation: the prior USER request grants directory-level
+        // authority for one new basename, while the current message supplies the
+        // missing scientific requirements. Assistant prose is not involved.
+        FixedResponseModelProvider provider{
+            "ACTION=TOOL\n"
+            "TOOL=create_text_file\n"
+            "ARG path=C:\\Users\\chris\\OneDrive\\Desktop\\airspeed_calculator.cpp\n"
+            "ARG content=#include <iostream>\\nint main() { return 0; }\n"
+            "END\n"
+        };
+
+        rose::tools::ToolRegistry registry;
+        registry.registerTool(
+            std::make_unique<TextMutationDummyTool>("create_text_file"));
+        rose::logging::Logger logger{
+            rose::logging::LoggerConfig{ .mode = rose::logging::LogMode::Silent }
+        };
+        rose::agent::ToolSelectionAgent agent{ provider, registry, logger };
+
+        const auto decision = agent.decide(
+            "Scientific, any object with parameters available to be entered and added.",
+            {},
+            {},
+            "Create a .cpp source file at C:\\Users\\chris\\OneDrive\\Desktop and design a program that calculates airspeed of an object within it.");
+
+        require(
+            decision.action == AgentAction::InvokeTool
+                && decision.toolRequest.has_value()
+                && decision.toolRequest->toolId == "create_text_file"
+                && decision.toolRequest->arguments.at("path")
+                    == "C:\\Users\\chris\\OneDrive\\Desktop\\airspeed_calculator.cpp",
+            "a continued source-creation request may choose one basename directly inside the user-grounded directory");
+    }
+
+    {
+        FixedResponseModelProvider provider{
+            "ACTION=TOOL\n"
+            "TOOL=create_text_file\n"
+            "ARG path=C:\\Users\\chris\\OneDrive\\Desktop\\airspeed_calculator.txt\n"
+            "ARG content=wrong extension\n"
+            "END\n"
+        };
+
+        rose::tools::ToolRegistry registry;
+        registry.registerTool(
+            std::make_unique<TextMutationDummyTool>("create_text_file"));
+        rose::logging::Logger logger{
+            rose::logging::LoggerConfig{ .mode = rose::logging::LogMode::Silent }
+        };
+        rose::agent::ToolSelectionAgent agent{ provider, registry, logger };
+
+        const auto decision = agent.decide(
+            "Scientific inputs.",
+            {},
+            {},
+            "Create a .cpp source file at C:\\Users\\chris\\OneDrive\\Desktop and design a program.");
+
+        require(
+            decision.action == AgentAction::RespondNormally,
+            "directory-scoped filename synthesis must preserve an explicitly requested file extension");
+    }
+
+    {
+        FixedResponseModelProvider provider{
+            "ACTION=TOOL\n"
+            "TOOL=create_text_file\n"
+            "ARG path=C:\\Temp\\airspeed_calculator.cpp\n"
+            "ARG content=int main() { return 0; }\n"
+            "END\n"
+        };
+
+        rose::tools::ToolRegistry registry;
+        registry.registerTool(
+            std::make_unique<TextMutationDummyTool>("create_text_file"));
+        rose::logging::Logger logger{
+            rose::logging::LoggerConfig{ .mode = rose::logging::LogMode::Silent }
+        };
+        rose::agent::ToolSelectionAgent agent{ provider, registry, logger };
+
+        const auto decision = agent.decide(
+            "Confirmed, please continue.",
+            {},
+            {},
+            "Create a .cpp source file at C:\\Users\\chris\\OneDrive\\Desktop and design a program that calculates airspeed of an object within it.");
+
+        require(
+            decision.action == AgentAction::RespondNormally
+                && !decision.toolRequest.has_value(),
+            "continued creation must reject a model-selected file outside the user-grounded directory");
+    }
+
+    {
+        FixedResponseModelProvider provider{
+            "ACTION=TOOL\n"
+            "TOOL=create_text_file\n"
+            "ARG path=C:\\Users\\chris\\OneDrive\\Desktop\\airspeed_calculator.cpp\n"
+            "ARG content=int main() { return 0; }\n"
+            "END\n"
+        };
+
+        rose::tools::ToolRegistry registry;
+        registry.registerTool(
+            std::make_unique<TextMutationDummyTool>("create_text_file"));
+        rose::logging::Logger logger{
+            rose::logging::LoggerConfig{ .mode = rose::logging::LogMode::Silent }
+        };
+        rose::agent::ToolSelectionAgent agent{ provider, registry, logger };
+
+        const auto decision = agent.decide(
+            "Do not create it after all.",
+            {},
+            {},
+            "Create a .cpp source file at C:\\Users\\chris\\OneDrive\\Desktop and design a program.");
+
+        require(
+            decision.action == AgentAction::RespondNormally,
+            "current user cancellation must override retained source-creation intent");
+    }
 
     std::cout
         << "Rose ToolSelectionAgent tests: PASS\n";

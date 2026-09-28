@@ -17,6 +17,7 @@ namespace rose::tools
         struct DirectoryEntrySummary
         {
             std::string name;
+            std::string absolutePath;
             std::string type;
             std::uintmax_t size{ 0 };
             bool hasSize{ false };
@@ -95,6 +96,9 @@ namespace rose::tools
             summary.name =
                 sanitizeSingleLine(
                     entry.path().filename().string());
+            summary.absolutePath =
+                sanitizeSingleLine(
+                    entry.path().lexically_normal().string());
 
             std::error_code error;
             const std::filesystem::file_status status =
@@ -164,7 +168,10 @@ namespace rose::tools
                 line << "[OTHER] ";
             }
 
-            line << entry.name;
+            line
+                << entry.name
+                << " | absolute_path="
+                << entry.absolutePath;
 
             if (entry.hasSize)
             {
@@ -188,8 +195,9 @@ namespace rose::tools
             .description =
                 "List one level of an existing absolute directory path. "
                 "The listing is read-only, non-recursive, bounded, and does not "
-                "follow symbolic links. Use it to discover exact file names before "
-                "requesting a file read.",
+                "follow symbolic links. Each entry includes a Rose-grounded absolute "
+                "path so later tools can safely inspect a discovered child without "
+                "inventing or concatenating filesystem paths.",
             .risk = ToolRisk::ReadOnly,
             .consent = ToolConsent::RequiresConfirmation,
             .parameters = {

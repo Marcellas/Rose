@@ -176,20 +176,20 @@ int main()
                 "Confirmed local write should complete.");
             require(writeExecutions == 1, "Confirmed write execution count mismatch.");
 
-            // Batch 47 appends repair-outcome event ids rather than inserting
-            // them into the persisted enum. Writing one before RunCompleted makes
-            // the restart check below exercise the durable store's accepted type
-            // range while the run provenance is still active.
+            // New event ids are appended rather than inserted into the persisted
+            // enum. Writing the newest Batch 50 event before RunCompleted makes the
+            // restart check below exercise the durable store's accepted type range
+            // while the run provenance is still active.
             journal.record(
                 rose::agent::AgentEvent{
                     .runId = runId,
-                    .type = rose::agent::AgentEventType::RepairValidated,
+                    .type = rose::agent::AgentEventType::CodingPlanCreated,
                     .stepIndex = 2,
-                    .toolId = "build_cmake_project",
+                    .toolId = {},
                     .projectId = {},
                     .discussionId = {},
-                    .message = "repair validation test event",
-                    .detail = "repair_step=1",
+                    .message = "coding plan persistence test event",
+                    .detail = "step_count=2",
                     .duration = {}
                 });
 

@@ -9,6 +9,7 @@
 #include "agent/ToolObservation.h"
 #include "agent/ToolSelectionAgent.h"
 #include "agent/ToolExecutionService.h"
+#include "agent/UserTaskContinuation.h"
 #include "archives/ZipArchiveService.h"
 #include "artifacts/ArtifactStore.h"
 #include "avatar/AvatarController.h"
@@ -1413,6 +1414,13 @@ int main()
                     std::optional<rose::agent::PendingAgentRun>
                         pendingAgentRun;
 
+                    // Short-lived USER-ONLY context for a tool-backed request that
+                    // needed clarification before Rose could form an exact action.
+                    // This never stores assistant prose and is scoped by active
+                    // project/discussion provenance.
+                    rose::agent::UserTaskContinuationState
+                        pendingUserTaskContinuation;
+
                     // ---------------------------------------------------------
                     // Workspace <-> UI synchronization
                     // ---------------------------------------------------------
@@ -1461,6 +1469,8 @@ int main()
                             // which it was created. Never carry that authority into
                             // a different persistent thread.
                             pendingAgentRun.reset();
+                            rose::agent::clearUserTaskContinuation(
+                                pendingUserTaskContinuation);
 
                             workspaceRepository.activateDiscussion(
                                 discussionId);
@@ -1502,6 +1512,8 @@ int main()
                                 discussionId);
                             roseCore.reloadConversation();
                             pendingAgentRun.reset();
+                            rose::agent::clearUserTaskContinuation(
+                                pendingUserTaskContinuation);
 
                             publishWorkspaceSnapshot();
                             publishVisibleConversation();
@@ -1527,6 +1539,8 @@ int main()
                                 discussionId);
                             roseCore.reloadConversation();
                             pendingAgentRun.reset();
+                            rose::agent::clearUserTaskContinuation(
+                                pendingUserTaskContinuation);
 
                             publishWorkspaceSnapshot();
                             publishVisibleConversation();
@@ -3105,7 +3119,7 @@ int main()
 
                         if (
                             commandEligible
-                            && submittedText == "/confirm")
+                            && commandText == "/confirm")
                         {
                             if (!pendingAgentRun.has_value())
                             {
@@ -3136,7 +3150,7 @@ int main()
                         }
                         else if (
                             commandEligible
-                            && submittedText == "/cancel")
+                            && commandText == "/cancel")
                         {
                             if (pendingAgentRun.has_value())
                             {
@@ -3166,6 +3180,8 @@ int main()
                                     });
 
                                 pendingAgentRun.reset();
+                                rose::agent::clearUserTaskContinuation(
+                                    pendingUserTaskContinuation);
 
                                 chatBridge.postEvent(
                                     rose::ui::ChatEvent{
@@ -3826,6 +3842,7 @@ int main()
                         // never impersonate a local command side effect.
                         if (
                             commandEligible
+                            && !confirmedAgentRun.has_value()
                             && !commandText.empty()
                             && commandText.front() == '/')
                         {
@@ -3978,6 +3995,8 @@ int main()
 
                                     pendingAgentRun =
                                         std::move(agentResult.pending);
+                                    rose::agent::clearUserTaskContinuation(
+                                        pendingUserTaskContinuation);
 
                                     chatBridge.postEvent(
                                         rose::ui::ChatEvent{
@@ -4025,11 +4044,30 @@ int main()
                                 avatarController.handleActivity(
                                     rose::core::RoseActivity::Thinking);
 
+                                const rose::agent::AgentRunProvenance provenance =
+                                    activeAgentProvenance();
+
+                                std::string priorUserTaskContext;
+                                if (rose::agent::shouldReuseUserTaskContinuation(
+                                        pendingUserTaskContinuation,
+                                        input,
+                                        provenance))
+                                {
+                                    priorUserTaskContext =
+                                        pendingUserTaskContinuation.userText;
+                                }
+                                else
+                                {
+                                    rose::agent::clearUserTaskContinuation(
+                                        pendingUserTaskContinuation);
+                                }
+
                                 rose::agent::AgentLoopResult agentResult =
                                     agentLoop.start(
                                         input,
                                         transientContext,
-                                        activeAgentProvenance());
+                                        provenance,
+                                        std::move(priorUserTaskContext));
 
                                 if (
                                     agentResult.status
@@ -4059,6 +4097,8 @@ int main()
 
                                     pendingAgentRun =
                                         std::move(agentResult.pending);
+                                    rose::agent::clearUserTaskContinuation(
+                                        pendingUserTaskContinuation);
 
                                     chatBridge.postEvent(
                                         rose::ui::ChatEvent{
@@ -4087,6 +4127,19 @@ int main()
                                 {
                                     pendingArtifacts.push_back(
                                         std::move(artifact));
+                                }
+
+                                if (agentResult.preserveUserTaskContinuation)
+                                {
+                                    rose::agent::rememberUserTaskContinuation(
+                                        pendingUserTaskContinuation,
+                                        agentResult.userTaskContinuationContext,
+                                        provenance);
+                                }
+                                else
+                                {
+                                    rose::agent::clearUserTaskContinuation(
+                                        pendingUserTaskContinuation);
                                 }
 
                                 input =

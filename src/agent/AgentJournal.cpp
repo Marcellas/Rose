@@ -184,6 +184,12 @@ namespace rose::agent
 
         case AgentEventType::RepairValidationFailed:
             return "RepairValidationFailed";
+
+        case AgentEventType::CodingPlanRequired:
+            return "CodingPlanRequired";
+
+        case AgentEventType::CodingPlanCreated:
+            return "CodingPlanCreated";
         }
 
         return "Unknown";

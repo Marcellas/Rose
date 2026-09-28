@@ -156,6 +156,47 @@ int main()
         std::error_code cleanupError;
         std::filesystem::remove_all(root, cleanupError);
 
+        // Default production bounds must leave room for Rose's system prompt and
+        // final response budget. A large directory may contain thousands of
+        // supported files, but one observation remains compact.
+        const std::filesystem::path boundedRoot =
+            std::filesystem::temp_directory_path()
+            / "rose-directory-document-analysis-bounded-test";
+        std::filesystem::remove_all(boundedRoot, cleanupError);
+        cleanupError.clear();
+        std::filesystem::create_directories(boundedRoot, cleanupError);
+        require(!cleanupError, "Could not create bounded directory-analysis root.");
+
+        for (int index = 0; index < 40; ++index)
+        {
+            std::ofstream stream{
+                boundedRoot / ("source_" + std::to_string(index) + ".cpp")
+            };
+            stream
+                << "// source evidence " << index << "\n"
+                << std::string(1500, 'x')
+                << "\n";
+        }
+
+        rose::tools::AnalyzeDirectoryDocumentsTool boundedTool{
+            std::make_unique<UnusedOcrEngine>()
+        };
+        const rose::tools::ToolResult boundedResult =
+            boundedTool.execute(
+                rose::tools::ToolRequest{
+                    .toolId = "analyze_directory_documents",
+                    .arguments = {
+                        { "path", boundedRoot.string() }
+                    }
+                });
+
+        require(
+            boundedResult.success
+                && boundedResult.message.size() <= 10u * 1024u,
+            "default directory analysis observation must remain within its 10 KiB context budget");
+
+        std::filesystem::remove_all(boundedRoot, cleanupError);
+
         std::cout << "Rose DirectoryDocumentAnalysis tests: PASS\n";
         return 0;
     }

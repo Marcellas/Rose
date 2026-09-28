@@ -12,6 +12,7 @@
 #include <sstream>
 #include <string>
 #include <string_view>
+#include <system_error>
 
 
 namespace rose::agent
@@ -529,6 +530,95 @@ namespace rose::agent
 
 
         [[nodiscard]]
+        std::optional<bool> latestToolObservationSuccess(
+            const std::string_view agentContext,
+            const std::string_view toolId)
+        {
+            // Tool observations are Rose-authored wrapper blocks. Only inspect the
+            // structured header fields before the free-form message payload so
+            // untrusted tool output cannot manufacture a successful completion.
+            constexpr std::string_view beginTag{
+                "<rose_tool_observation>"
+            };
+            constexpr std::string_view endTag{
+                "</rose_tool_observation>"
+            };
+
+            const std::string toolMarker =
+                "\ntool_id="
+                + std::string{ toolId }
+                + "\n";
+
+            std::optional<bool> latest;
+            std::size_t searchFrom{ 0 };
+
+            while (searchFrom < agentContext.size())
+            {
+                const std::size_t begin =
+                    agentContext.find(beginTag, searchFrom);
+                if (begin == std::string_view::npos)
+                {
+                    break;
+                }
+
+                const std::size_t end =
+                    agentContext.find(endTag, begin + beginTag.size());
+                if (end == std::string_view::npos)
+                {
+                    break;
+                }
+
+                const std::string_view block =
+                    agentContext.substr(begin, end - begin);
+                const std::size_t message =
+                    block.find("\nmessage=");
+                const std::string_view header =
+                    block.substr(
+                        0,
+                        message == std::string_view::npos
+                            ? std::string_view::npos
+                            : message);
+                const std::size_t tool = header.find(toolMarker);
+
+                if (tool != std::string_view::npos)
+                {
+                    const std::size_t headerBegin =
+                        tool + toolMarker.size();
+                    const std::size_t success =
+                        header.find("success=", headerBegin);
+
+                    if (success != std::string_view::npos)
+                    {
+                        const std::size_t valueBegin =
+                            success + std::string_view{ "success=" }.size();
+                        const std::size_t valueEnd =
+                            header.find('\n', valueBegin);
+                        const std::string_view value =
+                            header.substr(
+                                valueBegin,
+                                valueEnd == std::string_view::npos
+                                    ? std::string_view::npos
+                                    : valueEnd - valueBegin);
+
+                        if (value == "true")
+                        {
+                            latest = true;
+                        }
+                        else if (value == "false")
+                        {
+                            latest = false;
+                        }
+                    }
+                }
+
+                searchFrom = end + endTag.size();
+            }
+
+            return latest;
+        }
+
+
+        [[nodiscard]]
         bool toolRegistered(
             const tools::ToolRegistry& toolRegistry,
             const std::string_view toolId)
@@ -567,6 +657,40 @@ namespace rose::agent
         }
 
 
+#ifdef _WIN32
+        [[nodiscard]]
+        bool promptBoundaryAfterPathPrefix(
+            const std::string_view text,
+            const std::size_t end) noexcept
+        {
+            if (end >= text.size())
+            {
+                return true;
+            }
+
+            const unsigned char next =
+                static_cast<unsigned char>(
+                    text[end]);
+
+            // Existing-prefix recovery is allowed only when the candidate ends
+            // where path evidence can naturally end in the prompt. Without this
+            // boundary check, a nonexistent path such as C:\Docs\missing.cpp
+            // can be shortened all the way to the existing C:\ root, changing
+            // an exact-file request into a directory request on Windows.
+            return
+                std::isspace(next) != 0
+                || next == static_cast<unsigned char>('.')
+                || next == static_cast<unsigned char>(',')
+                || next == static_cast<unsigned char>(';')
+                || next == static_cast<unsigned char>(':')
+                || next == static_cast<unsigned char>('!')
+                || next == static_cast<unsigned char>('?')
+                || next == static_cast<unsigned char>(')')
+                || next == static_cast<unsigned char>(']');
+        }
+#endif
+
+
         [[nodiscard]]
         std::optional<std::string> longestExistingWindowsPathPrefix(
             const std::string_view text,
@@ -577,10 +701,12 @@ namespace rose::agent
                 decodeCommonPathEscapes(
                     text.substr(start));
 
-            // Stop at a hard line boundary first. Natural-language instructions
-            // may continue on the same line, so then search backwards for the
-            // longest prefix that actually exists on disk. This lets unquoted
-            // Windows paths contain spaces without forcing shell-style quoting.
+            // Stop at a hard line boundary. For an unquoted Windows path followed
+            // by prose on the same line, test progressively shorter character
+            // prefixes until the longest existing path is found. The previous
+            // implementation shortened only at spaces; in real prompts that could
+            // accidentally fall past the intended final path component and settle
+            // on an existing parent directory such as Desktop.
             const std::size_t lineEnd =
                 remainder.find_first_of("\r\n");
 
@@ -589,50 +715,53 @@ namespace rose::agent
                 remainder.resize(lineEnd);
             }
 
-            while (!remainder.empty())
+            auto ignorableTrailingCharacter =
+                [](const unsigned char character) noexcept
+                {
+                    return
+                        std::isspace(character) != 0
+                        || character == static_cast<unsigned char>('.')
+                        || character == static_cast<unsigned char>(',')
+                        || character == static_cast<unsigned char>(';')
+                        || character == static_cast<unsigned char>('!')
+                        || character == static_cast<unsigned char>('?')
+                        || character == static_cast<unsigned char>(')')
+                        || character == static_cast<unsigned char>(']');
+                };
+
+            std::size_t end = remainder.size();
+            while (end > 0)
             {
                 while (
-                    !remainder.empty()
-                    && (
-                        std::isspace(
-                            static_cast<unsigned char>(
-                                remainder.back())) != 0
-                        || remainder.back() == '.'
-                        || remainder.back() == ','
-                        || remainder.back() == ';'
-                        || remainder.back() == ':'
-                        || remainder.back() == '!'
-                        || remainder.back() == '?'
-                        || remainder.back() == ')'
-                        || remainder.back() == ']'))
+                    end > 0
+                    && ignorableTrailingCharacter(
+                        static_cast<unsigned char>(remainder[end - 1u])))
                 {
-                    remainder.pop_back();
+                    --end;
                 }
 
-                if (remainder.empty())
+                if (end == 0)
                 {
                     break;
                 }
 
                 std::error_code error;
-                const std::filesystem::path candidate{ remainder };
+                const std::filesystem::path candidate{
+                    remainder.substr(0, end)
+                };
 
                 if (
-                    std::filesystem::exists(candidate, error)
+                    promptBoundaryAfterPathPrefix(remainder, end)
+                    && std::filesystem::exists(candidate, error)
                     && !error)
                 {
                     return candidate.lexically_normal().string();
                 }
 
-                const std::size_t previousSpace =
-                    remainder.find_last_of(" \t");
-
-                if (previousSpace == std::string::npos)
-                {
-                    break;
-                }
-
-                remainder.resize(previousSpace);
+                // Remove one character, not one word. This preserves unquoted
+                // paths whose own directory/file names contain spaces while still
+                // allowing natural-language text after the path.
+                --end;
             }
 #else
             (void)text;
@@ -1013,6 +1142,162 @@ namespace rose::agent
             }
 
             return uniquePath;
+        }
+
+
+        [[nodiscard]]
+        bool isExistingNonSymlinkDirectory(
+            const std::string_view rawPath) noexcept
+        {
+            if (rawPath.empty())
+            {
+                return false;
+            }
+
+            std::error_code error;
+            const std::filesystem::file_status status =
+                std::filesystem::symlink_status(
+                    std::filesystem::path{ rawPath },
+                    error);
+
+            return
+                !error
+                && std::filesystem::is_directory(status)
+                && !std::filesystem::is_symlink(status);
+        }
+
+
+        [[nodiscard]]
+        bool looksLikeDevelopmentProjectDirectory(
+            const std::string_view rawPath) noexcept
+        {
+            if (!isExistingNonSymlinkDirectory(rawPath))
+            {
+                return false;
+            }
+
+            const std::filesystem::path root{ rawPath };
+            std::error_code error;
+
+            // Prefer cheap, explicit project markers before enumerating anything.
+            // This keeps routing deterministic and avoids recursively probing a
+            // potentially huge build/vendor tree just to decide which first tool
+            // should inspect the directory.
+            static constexpr std::string_view markerFiles[]{
+                "CMakeLists.txt",
+                "Makefile",
+                "meson.build",
+                "Cargo.toml",
+                "package.json",
+                "pyproject.toml",
+                "go.mod"
+            };
+
+            for (const std::string_view marker : markerFiles)
+            {
+                error.clear();
+                if (
+                    std::filesystem::is_regular_file(
+                        root / std::string{ marker },
+                        error)
+                    && !error)
+                {
+                    return true;
+                }
+            }
+
+            static constexpr std::string_view markerDirectories[]{
+                "src",
+                "include"
+            };
+
+            for (const std::string_view marker : markerDirectories)
+            {
+                error.clear();
+                const std::filesystem::file_status status =
+                    std::filesystem::symlink_status(
+                        root / std::string{ marker },
+                        error);
+
+                if (
+                    !error
+                    && std::filesystem::is_directory(status)
+                    && !std::filesystem::is_symlink(status))
+                {
+                    return true;
+                }
+            }
+
+            // A small source-only folder may not have a build-system marker yet.
+            // Inspect only one level and cap the work so routing never becomes a
+            // hidden recursive directory scan.
+            std::filesystem::directory_iterator iterator{
+                root,
+                std::filesystem::directory_options::skip_permission_denied,
+                error
+            };
+
+            if (error)
+            {
+                return false;
+            }
+
+            constexpr std::size_t maximumEntriesToInspect{ 128 };
+            std::size_t inspected{ 0 };
+            const std::filesystem::directory_iterator end;
+
+            for (
+                ; iterator != end && inspected < maximumEntriesToInspect;
+                iterator.increment(error), ++inspected)
+            {
+                if (error)
+                {
+                    error.clear();
+                    continue;
+                }
+
+                const std::filesystem::directory_entry& entry = *iterator;
+
+                error.clear();
+                const std::filesystem::file_status status =
+                    entry.symlink_status(error);
+
+                if (
+                    error
+                    || std::filesystem::is_symlink(status)
+                    || !std::filesystem::is_regular_file(status))
+                {
+                    error.clear();
+                    continue;
+                }
+
+                const std::string extension =
+                    asciiLower(
+                        entry.path().extension().string());
+
+                if (
+                    extension == ".c"
+                    || extension == ".cc"
+                    || extension == ".cpp"
+                    || extension == ".cxx"
+                    || extension == ".h"
+                    || extension == ".hpp"
+                    || extension == ".hxx"
+                    || extension == ".cs"
+                    || extension == ".java"
+                    || extension == ".rs"
+                    || extension == ".go"
+                    || extension == ".py"
+                    || extension == ".js"
+                    || extension == ".ts"
+                    || extension == ".sln"
+                    || extension == ".vcxproj")
+                {
+                    return true;
+                }
+            }
+
+            return false;
         }
 
 
@@ -1464,6 +1749,37 @@ namespace rose::agent
             asciiLower(
                 userText);
 
+        // Broad project diagnosis is an execution workflow, not merely a request
+        // for architectural description. Rose still performs bounded read-only
+        // discovery first. Once the project is grounded, a configured CMake build
+        // is a useful diagnostic action and remains confirmation-gated by policy.
+        const bool projectDiagnosisIntent =
+            containsAnyAsciiWord(
+                lowerUser,
+                { "diagnose", "diagnostic", "troubleshoot" })
+            || lowerUser.find("figure out what is going wrong") != std::string::npos
+            || lowerUser.find("figure out what's going wrong") != std::string::npos
+            || lowerUser.find("what is going wrong") != std::string::npos
+            || lowerUser.find("what's going wrong") != std::string::npos
+            || lowerUser.find("find what is wrong") != std::string::npos
+            || lowerUser.find("find what's wrong") != std::string::npos
+            || lowerUser.find("why is this failing") != std::string::npos
+            || lowerUser.find("why is it failing") != std::string::npos;
+
+        const bool explicitlyReadOnlyDiagnosis =
+            lowerUser.find("do not execute") != std::string::npos
+            || lowerUser.find("don't execute") != std::string::npos
+            || lowerUser.find("do not run anything") != std::string::npos
+            || lowerUser.find("don't run anything") != std::string::npos
+            || lowerUser.find("without executing") != std::string::npos
+            || lowerUser.find("read-only") != std::string::npos
+            || lowerUser.find("read only") != std::string::npos;
+
+        const bool projectDiscoveryCompleted =
+            completedTool(completedToolIds, "list_directory")
+            || completedTool(completedToolIds, "scan_directory_tree")
+            || completedTool(completedToolIds, "read_text_file");
+
 
         // ---------------------------------------------------------------------
         // Controlled existing-tree CMake reconfiguration
@@ -1539,8 +1855,13 @@ namespace rose::agent
             || lowerUser.find("show me how") != std::string::npos
             || lowerUser.find("what command") != std::string::npos;
 
+        const bool diagnosisBuildIntent =
+            projectDiagnosisIntent
+            && projectDiscoveryCompleted
+            && !explicitlyReadOnlyDiagnosis;
+
         const bool buildIntent =
-            buildTopic
+            (buildTopic || diagnosisBuildIntent)
             && !explicitlyNonExecutingBuild;
 
         if (buildIntent
@@ -1610,9 +1931,28 @@ namespace rose::agent
                 || lowerUser.starts_with("test ")
                 || lowerUser.starts_with("test:"));
 
+        const bool explicitlyNonExecutingTests =
+            lowerUser.find("do not run tests") != std::string::npos
+            || lowerUser.find("don't run tests") != std::string::npos
+            || lowerUser.find("without running tests") != std::string::npos
+            || lowerUser.find("without tests") != std::string::npos;
+
+        const bool diagnosisTestIntent =
+            projectDiagnosisIntent
+            && projectDiscoveryCompleted
+            && completedTool(completedToolIds, "build_cmake_project")
+            && latestToolObservationSuccess(
+                   agentContext,
+                   "build_cmake_project")
+                   .value_or(false)
+            && !explicitlyReadOnlyDiagnosis
+            && !explicitlyNonExecutingBuild
+            && !explicitlyNonExecutingTests;
+
         const bool testIntent =
             explicitCMakeTestExecutionIntent(
-                userText);
+                userText)
+            || diagnosisTestIntent;
 
         if (testIntent
             && !completedTool(completedToolIds, "run_cmake_tests")
@@ -1805,16 +2145,19 @@ namespace rose::agent
         // Treating those words alone as directory intent caused a successful
         // read_office_document observation to be followed by the directory
         // analyzer against the .docx path.
-        const bool directoryBatchIntent =
+        const bool explicitDirectoryContentBatchIntent =
             lowerUser.find("all files") != std::string::npos
             || lowerUser.find("each file") != std::string::npos
             || lowerUser.find("every file") != std::string::npos
             || lowerUser.find("entire directory") != std::string::npos
             || lowerUser.find("whole directory") != std::string::npos
-            || containsAsciiWord(lowerUser, "directory")
-            || containsAsciiWord(lowerUser, "folder")
             || containsAsciiWord(lowerUser, "batch")
             || lowerUser.find("under ") != std::string::npos;
+
+        const bool directoryBatchIntent =
+            explicitDirectoryContentBatchIntent
+            || containsAsciiWord(lowerUser, "directory")
+            || containsAsciiWord(lowerUser, "folder");
 
 
         const bool directoryReadIntent =
@@ -1830,8 +2173,97 @@ namespace rose::agent
                 });
 
 
+        // A concrete existing directory is authoritative type evidence even when
+        // the user naturally says "analyze C:\\Project" without the literal words
+        // "directory" or "folder". This prevents deterministic recovery from
+        // handing a directory path to read_text_file and failing after confirmation.
+        const std::optional<std::string> explicitDirectoryCandidate =
+            extractAbsoluteWindowsPath(
+                userText);
+
+        const bool explicitPathIsDirectory =
+            explicitDirectoryCandidate.has_value()
+            && isExistingNonSymlinkDirectory(
+                *explicitDirectoryCandidate);
+
+        const bool developmentProjectDirectory =
+            explicitPathIsDirectory
+            && explicitDirectoryCandidate.has_value()
+            && looksLikeDevelopmentProjectDirectory(
+                *explicitDirectoryCandidate);
+
+
+        // A software project is not a document corpus. For a broad request such
+        // as "Analyze C:\Rose and figure out what is going wrong", start with
+        // one bounded root listing so Rose can discover grounded CMake/source/build
+        // children, then return control to the normal multi-step agent loop. The
+        // document-batch analyzer is terminal after one bounded excerpt batch and
+        // can otherwise spend its whole budget on .vs/build/vendor artifacts.
+        //
+        // Explicit all/each/every-file requests remain document-batch workflows;
+        // those users asked Rose to read the corpus rather than diagnose the project.
         if (
-            directoryBatchIntent
+            developmentProjectDirectory
+            && directoryReadIntent
+            && !explicitDirectoryContentBatchIntent)
+        {
+            if (
+                !completedTool(
+                    completedToolIds,
+                    "list_directory")
+                && toolRegistered(
+                    toolRegistry,
+                    "list_directory"))
+            {
+                return tools::ToolRequest{
+                    .toolId = "list_directory",
+                    .arguments = {
+                        {
+                            "path",
+                            *explicitDirectoryCandidate
+                        }
+                    }
+                };
+            }
+
+            // If the model still chooses RESPOND after the root listing, one
+            // one bounded recursive inventory is a safe deterministic continuation for the user's
+            // still-unsatisfied project diagnosis. This is intentionally
+            // only a fallback: AgentLoop asks the model first, so a more targeted
+            // read/build/test decision wins when the router can make one.
+            if (
+                !completedTool(
+                    completedToolIds,
+                    "scan_directory_tree")
+                && toolRegistered(
+                    toolRegistry,
+                    "scan_directory_tree"))
+            {
+                return tools::ToolRequest{
+                    .toolId = "scan_directory_tree",
+                    .arguments = {
+                        {
+                            "path",
+                            *explicitDirectoryCandidate
+                        },
+                        {
+                            "max_depth",
+                            "2"
+                        }
+                    }
+                };
+            }
+
+            // Once both bounded discovery steps have run, do not reinterpret the
+            // original project path as a terminal document-batch read. The control
+            // model now has Rose-owned child paths and may choose a targeted source
+            // read or propose a confirmation-gated validation action.
+            return std::nullopt;
+        }
+
+
+        if (
+            (directoryBatchIntent || explicitPathIsDirectory)
             && directoryReadIntent
             && !completedTool(
                 completedToolIds,
@@ -1840,11 +2272,7 @@ namespace rose::agent
                 toolRegistry,
                 "analyze_directory_documents"))
         {
-            const std::optional<std::string> path =
-                extractAbsoluteWindowsPath(
-                    userText);
-
-            if (path.has_value())
+            if (explicitDirectoryCandidate.has_value())
             {
                 return tools::ToolRequest{
                     .toolId =
@@ -1852,11 +2280,20 @@ namespace rose::agent
                     .arguments = {
                         {
                             "path",
-                            *path
+                            *explicitDirectoryCandidate
                         }
                     }
                 };
             }
+        }
+
+
+        // An existing directory must never fall through to an exact-file reader.
+        // If the batch analyzer is unavailable/already satisfied, fail closed to
+        // normal response rather than proposing read_text_file(path=<directory>).
+        if (explicitPathIsDirectory)
+        {
+            return std::nullopt;
         }
 
 
@@ -2311,6 +2748,10 @@ namespace rose::agent
                "was created, or any other external/tool action completed unless a "
                "tool observation in this transient context explicitly proves it.\n"
             << "Registered capability is not execution evidence.\n"
+            << "The registered capability contract is authoritative: do NOT tell "
+               "the user Rose lacks a capability that is listed there, and do not "
+               "redirect them to an external editor solely because routing could not "
+               "yet form an exact request.\n"
             << "If the requested action still lacks required information, ask for "
                "that information.\n"
             << "If no tool observation proves completion, describe the action as "
