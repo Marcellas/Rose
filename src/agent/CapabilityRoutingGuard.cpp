@@ -13,6 +13,7 @@
 #include <string>
 #include <string_view>
 #include <system_error>
+#include <vector>
 
 
 namespace rose::agent
@@ -1786,12 +1787,86 @@ namespace rose::agent
 
 
     std::optional<tools::ToolRequest>
+    CapabilityRoutingGuard::explicitNamedPdfRequest(
+        const std::string_view userText,
+        const tools::ToolRegistry& toolRegistry)
+    {
+        const std::string lowerUser = asciiLower(userText);
+        if (!containsAnyAsciiWord(lowerUser,
+                { "analyze", "inspect", "read", "review", "summarize" }))
+        {
+            return std::nullopt;
+        }
+
+        std::vector<std::string> paths;
+        for (std::size_t start = 0; start < userText.size(); ++start)
+        {
+            const char quote = userText[start];
+            if (quote != '"' && quote != '\'') continue;
+            const std::size_t end = userText.find(quote, start + 1);
+            if (end == std::string_view::npos) continue;
+            const std::string_view candidate =
+                userText.substr(start + 1, end - start - 1);
+            const bool driveAbsolute = candidate.size() >= 3
+                && ((candidate[0] >= 'A' && candidate[0] <= 'Z')
+                    || (candidate[0] >= 'a' && candidate[0] <= 'z'))
+                && candidate[1] == ':'
+                && (candidate[2] == '\\' || candidate[2] == '/');
+            if ((driveAbsolute || candidate.starts_with("\\\\"))
+                && candidate.size() <= 1024
+                && asciiLower(candidate).ends_with(".pdf"))
+            {
+                const std::string path = decodeCommonPathEscapes(candidate);
+                const std::string normalized = asciiLower(path);
+                bool duplicate = false;
+                for (const std::string& previous : paths)
+                {
+                    if (asciiLower(previous) == normalized) duplicate = true;
+                }
+                if (!duplicate) paths.push_back(path);
+                start = end;
+            }
+        }
+
+        if (paths.size() == 1 && toolRegistered(toolRegistry, "read_pdf"))
+        {
+            return tools::ToolRequest{
+                .toolId = "read_pdf",
+                .arguments = { { "path", paths.front() },
+                    { "instruction", std::string{ userText } } }
+            };
+        }
+        if (paths.size() < 2 || paths.size() > 4
+            || !toolRegistered(toolRegistry, "read_named_pdfs"))
+        {
+            return std::nullopt;
+        }
+
+        tools::ToolRequest request{ .toolId = "read_named_pdfs", .arguments = {} };
+        for (std::size_t i = 0; i < paths.size(); ++i)
+        {
+            request.arguments.emplace("path" + std::to_string(i + 1), paths[i]);
+        }
+        request.arguments.emplace("instruction", std::string{ userText });
+        return request;
+    }
+
+
+    std::optional<tools::ToolRequest>
     CapabilityRoutingGuard::recoverDirectToolRequest(
         const std::string_view userText,
         const tools::ToolRegistry& toolRegistry,
         const std::span<const std::string_view> completedToolIds,
         const std::string_view agentContext)
     {
+        if (!completedTool(completedToolIds, "read_named_pdfs")
+            && !completedTool(completedToolIds, "read_pdf"))
+        {
+            if (auto named = explicitNamedPdfRequest(userText, toolRegistry))
+            {
+                return named;
+            }
+        }
         if (!completedTool(completedToolIds, "search_local_files"))
         {
             if (auto search = explicitOfflineSearchRequest(userText, toolRegistry))

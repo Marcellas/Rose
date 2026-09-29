@@ -82,6 +82,7 @@
 #include "tools/ReadFileTool.h"
 #include "tools/ReadTextFileRegisteredTool.h"
 #include "tools/ReadPdfRegisteredTool.h"
+#include "tools/ReadNamedPdfsTool.h"
 #include "tools/ReadOfficeDocumentRegisteredTool.h"
 #include "tools/CreateOfficeDocumentTool.h"
 #include "tools/EditOfficeDocumentTool.h"
@@ -1214,13 +1215,17 @@ int main()
                                 permissionSystem,
                                 readFileTool));
 
+                    auto pdfReader = std::make_unique<
+                        rose::tools::ReadPdfRegisteredTool>(
+                            permissionSystem,
+                            readFileTool,
+                            std::make_unique<rose::ocr::TesseractCliOcrEngine>(),
+                            *agentModelProvider);
+                    rose::tools::ITool& pdfReaderRef = *pdfReader;
+                    toolRegistry.registerTool(std::move(pdfReader));
                     toolRegistry.registerTool(
-                        std::make_unique<
-                            rose::tools::ReadPdfRegisteredTool>(
-                                permissionSystem,
-                                readFileTool,
-                                std::make_unique<rose::ocr::TesseractCliOcrEngine>(),
-                                *agentModelProvider));
+                        std::make_unique<rose::tools::ReadNamedPdfsTool>(
+                            pdfReaderRef));
 
                     toolRegistry.registerTool(
                         std::make_unique<

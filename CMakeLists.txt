@@ -13,6 +13,7 @@ enable_testing()
 add_executable(RoseSearchAndApprovalTest
     src/tools/SearchAndApproval_test.cpp
     src/tools/SearchLocalFilesTool.cpp
+    src/tools/ReadNamedPdfsTool.cpp
     src/tools/ToolRegistry.cpp
     src/agent/CapabilityRoutingGuard.cpp
     src/files/FileFormatCatalog.cpp
@@ -954,6 +955,8 @@ add_executable(
     src/tools/ReadTextFileRegisteredTool.cpp
     src/tools/ReadPdfRegisteredTool.h
     src/tools/ReadPdfRegisteredTool.cpp
+    src/tools/ReadNamedPdfsTool.h
+    src/tools/ReadNamedPdfsTool.cpp
     src/tools/ReadOfficeDocumentRegisteredTool.h
     src/tools/ReadOfficeDocumentRegisteredTool.cpp
     src/tools/CreateOfficeDocumentTool.h

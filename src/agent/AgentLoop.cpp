@@ -682,7 +682,8 @@ namespace rose::agent
             // synthesize into the answer; sending the same large evidence through
             // another all-tools routing pass wastes context and can overflow the
             // local model before the final response is produced.
-            return toolId == "analyze_directory_documents";
+            return toolId == "analyze_directory_documents"
+                || toolId == "read_named_pdfs";
         }
 
 

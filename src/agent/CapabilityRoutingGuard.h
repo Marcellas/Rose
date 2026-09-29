@@ -72,6 +72,14 @@ namespace rose::agent
             std::string_view userText,
             const tools::ToolRegistry& toolRegistry);
 
+        // Quoted, explicitly named PDF files are a file-scoped task. A request
+        // naming several PDFs becomes one confirmation-gated bounded batch,
+        // never a parent-directory analysis selected by the control model.
+        [[nodiscard]]
+        static std::optional<tools::ToolRequest> explicitNamedPdfRequest(
+            std::string_view userText,
+            const tools::ToolRegistry& toolRegistry);
+
 
         // Recover only narrow, structurally obvious requests after BOTH model
         // routing passes declined to invoke a tool.

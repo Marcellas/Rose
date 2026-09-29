@@ -1152,6 +1152,23 @@ namespace rose::agent
             }
         }
 
+        // A list of quoted PDF paths is exact file authority. Do not let a
+        // model replace it with the parent directory or declare the files read.
+        if (agentContext.find("tool_id=read_named_pdfs") == std::string_view::npos
+            && agentContext.find("tool_id=read_pdf") == std::string_view::npos)
+        {
+            if (auto named = CapabilityRoutingGuard::explicitNamedPdfRequest(
+                    userText, toolRegistry_))
+            {
+                return AgentDecision{
+                    .action = AgentAction::InvokeTool,
+                    .toolRequest = std::move(*named),
+                    .codingTaskPlan = std::nullopt,
+                    .rawModelOutput = {}
+                };
+            }
+        }
+
         // A whole-directory content-based rename is intentionally split into
         // two bounded phases. Once the planner has produced a compact Rose-owned
         // plan, applying that exact plan is deterministic and does not need another

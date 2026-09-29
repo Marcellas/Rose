@@ -807,6 +807,30 @@ int main()
     using rose::agent::AgentAction;
 
     {
+        SequencedResponseModelProvider provider{
+            { "ACTION=TOOL\nTOOL=analyze_directory_documents\n"
+              "ARG path=C:\\Legal\nEND\n" }
+        };
+        rose::tools::ToolRegistry registry;
+        registry.registerTool(std::make_unique<PathDummyTool>("read_pdf"));
+        registry.registerTool(std::make_unique<PathDummyTool>("read_named_pdfs"));
+        registry.registerTool(std::make_unique<PathDummyTool>("analyze_directory_documents"));
+        rose::logging::Logger logger{
+            rose::logging::LoggerConfig{ .mode = rose::logging::LogMode::Silent }
+        };
+        rose::agent::ToolSelectionAgent agent{ provider, registry, logger };
+        const auto decision = agent.decide(
+            R"(Analyze "C:\Legal\AO.pdf", "C:\Legal\Navy BCNR\Application.pdf" and "C:\Desktop\Decision.pdf". Read those files, not their directories.)");
+        require(decision.action == AgentAction::InvokeTool
+            && decision.toolRequest.has_value()
+            && decision.toolRequest->toolId == "read_named_pdfs"
+            && decision.toolRequest->arguments.at("path3")
+                == R"(C:\Desktop\Decision.pdf)"
+            && provider.generationCount() == 0,
+            "named PDF paths must override model-invented directory analysis");
+    }
+
+    {
         const auto decision =
             decide(
                 "ACTION=TOOL\n"

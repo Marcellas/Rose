@@ -5,8 +5,8 @@
 namespace rose::tools
 {
     // A bounded, read-only search inside one user-selected directory. It searches
-    // every filename and the contents of small UTF-8/plain-text files. Other file
-    // types remain discoverable by name without attempting to parse binary data.
+    // every filename and the contents of small likely plain-text files regardless
+    // of extension. Binary files remain discoverable by name.
     class SearchLocalFilesTool final : public ITool
     {
     public:

@@ -1,6 +1,7 @@
 #include "tools/SearchLocalFilesTool.h"
 
 #include <algorithm>
+#include <array>
 #include <cctype>
 #include <filesystem>
 #include <fstream>
@@ -9,6 +10,7 @@
 #include <string>
 #include <string_view>
 #include <system_error>
+#include <utility>
 
 namespace rose::tools
 {
@@ -21,20 +23,74 @@ namespace rose::tools
             return text;
         }
 
-        [[nodiscard]] bool searchableText(const std::filesystem::path& path)
+        [[nodiscard]] bool separator(const char c) noexcept
         {
-            const std::string extension = lowerAscii(path.extension().string());
-            static constexpr std::string_view extensions[] = {
-                ".txt", ".md", ".log", ".csv", ".tsv", ".json", ".jsonl",
-                ".xml", ".yaml", ".yml", ".toml", ".ini", ".cfg",
-                ".cpp", ".c", ".h", ".hpp", ".cs", ".py", ".js",
-                ".ts", ".tsx", ".html", ".css", ".rs", ".go",
-                ".java", ".kt", ".sql", ".cmake", ".ps1", ".sh",
-                ".tex", ".rst"
-            };
-            return std::find(std::begin(extensions), std::end(extensions), extension)
-                    != std::end(extensions)
-                || lowerAscii(path.filename().string()) == "cmakelists.txt";
+            return c == ' ' || c == '\t' || c == '_' || c == '-';
+        }
+
+        [[nodiscard]] std::string withoutSeparators(std::string_view text)
+        {
+            std::string result;
+            result.reserve(text.size());
+            for (const char c : text)
+            {
+                if (!separator(c)) result.push_back(c);
+            }
+            return result;
+        }
+
+        enum class MatchKind { None, Literal, SeparatorFolded };
+
+        [[nodiscard]] MatchKind matchText(std::string text,
+            std::string_view query, std::string_view foldedQuery)
+        {
+            text = lowerAscii(std::move(text));
+            if (text.find(query) != std::string::npos) return MatchKind::Literal;
+            if (query != foldedQuery
+                && withoutSeparators(text).find(foldedQuery) != std::string::npos)
+                return MatchKind::SeparatorFolded;
+            return MatchKind::None;
+        }
+
+        struct TextProbe
+        {
+            bool text{ false };
+            std::size_t bytesRead{ 0 };
+        };
+
+        [[nodiscard]] TextProbe probePlainText(std::ifstream& input)
+        {
+            std::array<char, 4096> sample{};
+            input.read(sample.data(), static_cast<std::streamsize>(sample.size()));
+            const auto count = static_cast<std::size_t>(input.gcount());
+            input.clear();
+            input.seekg(0, std::ios::beg);
+            if (!input) return { false, count };
+
+            // UTF-16 requires decoding; a byte-wise substring search cannot
+            // reliably report whether it contains this literal query.
+            if (count >= 2 && ((static_cast<unsigned char>(sample[0]) == 0xff
+                    && static_cast<unsigned char>(sample[1]) == 0xfe)
+                || (static_cast<unsigned char>(sample[0]) == 0xfe
+                    && static_cast<unsigned char>(sample[1]) == 0xff)))
+                return { false, count };
+            if (count >= 5 && std::string_view(sample.data(), 5) == "%PDF-")
+                return { false, count };
+            if (count >= 4 && sample[0] == 'P' && sample[1] == 'K'
+                && static_cast<unsigned char>(sample[2]) == 3
+                && static_cast<unsigned char>(sample[3]) == 4)
+                return { false, count };
+
+            std::size_t controls{ 0 };
+            for (std::size_t i = 0; i < count; ++i)
+            {
+                const unsigned char byte = static_cast<unsigned char>(sample[i]);
+                if (byte == 0) return { false, count };
+                if ((byte < 32 && byte != '\t' && byte != '\n'
+                        && byte != '\r' && byte != '\f') || byte == 127)
+                    ++controls;
+            }
+            return { count == 0 || controls * 100 <= count, count };
         }
 
         [[nodiscard]] std::string excerpt(std::string_view line)
@@ -54,7 +110,7 @@ namespace rose::tools
         : descriptor_{
             .id = "search_local_files",
             .displayName = "Search Offline Files",
-            .description = "Search filenames and small text/source contents below one exact absolute directory. Bounded to 5000 entries, depth 8, 32 MiB scanned text, 60 matches, and 24 KiB output. Does not follow symlinks or use the network. Query is a literal, ASCII case-insensitive substring.",
+            .description = "Search filenames and likely plain-text contents regardless of extension below one exact absolute directory. Bounded to 5000 entries, depth 8, 1 MiB per file, 32 MiB read, 60 matches, and 24 KiB output. Binary files remain searchable by name. Does not follow symlinks or use the network. ASCII case-insensitive; also matches code names after folding spaces, underscores, and hyphens in a query.",
             .risk = ToolRisk::ReadOnly,
             .consent = ToolConsent::RequiresConfirmation,
             .parameters = {
@@ -80,7 +136,8 @@ namespace rose::tools
 
         const std::filesystem::path root{ request.arguments.at("path") };
         const std::string query = lowerAscii(request.arguments.at("query"));
-        if (!root.is_absolute() || query.empty() || query.size() > 256)
+        const std::string foldedQuery = withoutSeparators(query);
+        if (!root.is_absolute() || foldedQuery.empty() || query.size() > 256)
         {
             throw std::invalid_argument{ "Search requires an absolute directory and a 1..256 byte query." };
         }
@@ -126,9 +183,12 @@ namespace rose::tools
 
             const std::filesystem::path path = entry.path();
             const std::string pathText = path.string();
-            if (lowerAscii(path.filename().string()).find(query) != std::string::npos)
+            const MatchKind filenameMatch = matchText(path.filename().string(),
+                query, foldedQuery);
+            if (filenameMatch != MatchKind::None)
             {
-                matches << pathText << " [filename]\n";
+                matches << pathText << (filenameMatch == MatchKind::Literal
+                    ? " [filename]\n" : " [filename, separator-folded]\n");
                 ++found;
                 if (matches.tellp() >= static_cast<std::streamoff>(maximumOutput))
                 {
@@ -138,35 +198,45 @@ namespace rose::tools
             }
 
             if (found >= maximumMatches
-                || matches.tellp() >= static_cast<std::streamoff>(maximumOutput)
-                || !searchableText(path)) continue;
+                || matches.tellp() >= static_cast<std::streamoff>(maximumOutput)) continue;
             const auto size = entry.file_size(error);
             if (error || size > maximumTextFileBytes)
             {
                 error.clear();
                 continue;
             }
-            if (size > maximumTotalTextBytes - scannedTextBytes)
-            {
-                partial = true;
-                break;
-            }
-            scannedTextBytes += size;
-
             std::ifstream input(path, std::ios::binary);
             if (!input)
             {
                 partial = true;
                 continue;
             }
+            const std::uintmax_t probeBytes = std::min<std::uintmax_t>(size, 4096);
+            if (probeBytes > maximumTotalTextBytes - scannedTextBytes)
+            {
+                partial = true;
+                break;
+            }
+            const TextProbe probe = probePlainText(input);
+            scannedTextBytes += probe.bytesRead;
+            if (!probe.text) continue;
+            if (size > maximumTotalTextBytes - scannedTextBytes)
+            {
+                partial = true;
+                break;
+            }
+            scannedTextBytes += size;
             std::string line;
             std::size_t lineNumber{ 0 };
             while (std::getline(input, line) && found < maximumMatches)
             {
                 ++lineNumber;
                 if (line.find('\0') != std::string::npos) break;
-                if (lowerAscii(line).find(query) == std::string::npos) continue;
-                matches << pathText << ':' << lineNumber << ": " << excerpt(line) << '\n';
+                const MatchKind lineMatch = matchText(line, query, foldedQuery);
+                if (lineMatch == MatchKind::None) continue;
+                matches << pathText << ':' << lineNumber << ": " << excerpt(line)
+                    << (lineMatch == MatchKind::SeparatorFolded
+                        ? " [separator-folded]" : "") << '\n';
                 ++found;
                 if (matches.tellp() >= static_cast<std::streamoff>(maximumOutput)) break;
             }
@@ -183,7 +253,7 @@ namespace rose::tools
                 + (found ? matches.str() : "No matches in the searched scope.\n"),
             .trustedMetadata = {},
             .sourceWindowEvidence = std::nullopt,
-            .responseMode = ToolResponseMode::RequiresModelSynthesis,
+            .responseMode = ToolResponseMode::AuthoritativeCompletion,
             .artifacts = {}
         };
     }
