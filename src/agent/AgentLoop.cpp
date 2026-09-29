@@ -749,6 +749,7 @@ namespace rose::agent
             .originalUserText = std::move(userText),
             .transientContext = std::move(initialTransientContext),
             .priorUserTaskContext = std::move(priorUserTaskContext),
+            .approvedReadScope = std::nullopt,
             .executedToolCount = 0,
             .executedRequestFingerprints = {},
             .toolCompletion = {}
@@ -1165,12 +1166,27 @@ namespace rose::agent
                     return false;
                 }
 
+                permissions::ToolConfirmationState authorization = confirmation;
+                if (authorization == permissions::ToolConfirmationState::NotConfirmed
+                    && state.approvedReadScope.has_value())
+                {
+                    if (const tools::ITool* tool =
+                            toolRegistry_.find(effectiveRequest.toolId);
+                        tool != nullptr
+                        && coveredByReadScope(*state.approvedReadScope,
+                            effectiveRequest, tool->descriptor()))
+                    {
+                        authorization =
+                            permissions::ToolConfirmationState::ScopedReadApproved;
+                    }
+                }
+
                 ToolExecutionServiceResult execution =
                     executionService_.execute(
                         effectiveRequest,
                         state.runId,
                         stepIndex,
-                        confirmation);
+                        authorization);
 
                 if (execution.status
                     == ToolExecutionServiceStatus::RequiresConfirmation)
@@ -1235,6 +1251,15 @@ namespace rose::agent
 
                 tools::ToolResult toolResult =
                     std::move(execution.result);
+
+                if (authorization
+                        == permissions::ToolConfirmationState::ExplicitlyConfirmed
+                    && toolResult.success
+                    && !state.approvedReadScope.has_value())
+                {
+                    state.approvedReadScope = approvedReadScope(
+                        effectiveRequest, execution.descriptor);
+                }
 
                 // If this is the exact validation retained for a previously
                 // applied repair, classify its outcome BEFORE RepairValidationReplay

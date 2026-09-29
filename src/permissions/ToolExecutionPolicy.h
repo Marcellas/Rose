@@ -18,7 +18,8 @@ namespace rose::permissions
     enum class ToolConfirmationState
     {
         NotConfirmed,
-        ExplicitlyConfirmed
+        ExplicitlyConfirmed,
+        ScopedReadApproved
     };
 
 
@@ -41,8 +42,8 @@ namespace rose::permissions
 
     // Central policy gate between an Agent proposal and actual tool execution.
     //
-    // Explicit confirmation applies only to the exact ToolRequest Rose previously
-    // placed in PendingToolConfirmation. The model cannot manufacture this state.
+    // Explicit confirmation applies only to the exact pending ToolRequest. A
+    // separate run-local scoped approval is reserved for read-only operations.
     class ToolExecutionPolicy final
     {
     public:

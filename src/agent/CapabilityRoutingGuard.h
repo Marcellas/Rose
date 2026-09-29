@@ -65,6 +65,13 @@ namespace rose::agent
         static bool explicitCMakeTestExecutionIntent(
             std::string_view userText);
 
+        // An explicit quoted query plus quoted absolute search root is already
+        // enough to invoke the exact registered search tool without model guesses.
+        [[nodiscard]]
+        static std::optional<tools::ToolRequest> explicitOfflineSearchRequest(
+            std::string_view userText,
+            const tools::ToolRegistry& toolRegistry);
+
 
         // Recover only narrow, structurally obvious requests after BOTH model
         // routing passes declined to invoke a tool.

@@ -1739,12 +1739,66 @@ namespace rose::agent
 
 
     std::optional<tools::ToolRequest>
+    CapabilityRoutingGuard::explicitOfflineSearchRequest(
+        const std::string_view userText,
+        const tools::ToolRegistry& toolRegistry)
+    {
+        if (!toolRegistered(toolRegistry, "search_local_files"))
+        {
+            return std::nullopt;
+        }
+        const std::string lower = asciiLower(userText);
+        if (!containsAnyAsciiWord(lower, { "search", "find" }))
+        {
+            return std::nullopt;
+        }
+        const auto path = extractAbsoluteWindowsPath(userText);
+        if (!path.has_value())
+        {
+            return std::nullopt;
+        }
+
+        // Require a separately quoted literal term. The path is supplied by the
+        // user, never filled in from a similar folder or model speculation.
+        for (const char quote : { '"', '\'' })
+        {
+            std::size_t start = 0;
+            while ((start = userText.find(quote, start)) != std::string_view::npos)
+            {
+                const std::size_t end = userText.find(quote, start + 1);
+                if (end == std::string_view::npos) break;
+                const std::string candidate(userText.substr(start + 1, end - start - 1));
+                if (!candidate.empty() && candidate.size() <= 256
+                    && candidate != *path
+                    && !(candidate.size() >= 2 && candidate[1] == ':')
+                    && !candidate.starts_with("\\\\"))
+                {
+                    return tools::ToolRequest{
+                        .toolId = "search_local_files",
+                        .arguments = { { "path", *path }, { "query", candidate } }
+                    };
+                }
+                start = end + 1;
+            }
+        }
+        return std::nullopt;
+    }
+
+
+    std::optional<tools::ToolRequest>
     CapabilityRoutingGuard::recoverDirectToolRequest(
         const std::string_view userText,
         const tools::ToolRegistry& toolRegistry,
         const std::span<const std::string_view> completedToolIds,
         const std::string_view agentContext)
     {
+        if (!completedTool(completedToolIds, "search_local_files"))
+        {
+            if (auto search = explicitOfflineSearchRequest(userText, toolRegistry))
+            {
+                return search;
+            }
+        }
         const std::string lowerUser =
             asciiLower(
                 userText);

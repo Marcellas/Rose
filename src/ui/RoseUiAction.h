@@ -24,6 +24,7 @@ namespace rose::ui
         Email,
         SearchOnline,
         SearchOffline,
+        AnalyzeScreen,
         Files,
         ProjectKnowledge,
         Memory,

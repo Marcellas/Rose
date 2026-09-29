@@ -1,7 +1,10 @@
 #include "ui/SdlChatWindow.h"
 #include "ui/TextPresentation.h"
+#include "ui/ScreenImageCapture.h"
+#include "files/FileFormatCatalog.h"
 
 #include <SDL3/SDL.h>
+#include <SDL3_image/SDL_image.h>
 #include <SDL3_ttf/SDL_ttf.h>
 
 #include <algorithm>
@@ -11,6 +14,14 @@
 #include <utility>
 #include <iostream>
 #include <limits>
+#include <system_error>
+
+#ifdef _WIN32
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <Windows.h>
+#endif
 
 
 namespace rose::ui
@@ -132,6 +143,29 @@ namespace rose::ui
                 + SDL_GetError()
             };
         }
+
+#ifdef _WIN32
+        wchar_t windowsDirectory[MAX_PATH]{};
+        const UINT directoryLength =
+            GetWindowsDirectoryW(windowsDirectory, MAX_PATH);
+        if (directoryLength > 0 && directoryLength < MAX_PATH)
+        {
+            const std::filesystem::path symbolPath =
+                std::filesystem::path{ windowsDirectory } / "Fonts" / "seguisym.ttf";
+            if (std::filesystem::exists(symbolPath))
+            {
+                const std::string symbolPathText = symbolPath.string();
+                mathFallbackFont_.reset(TTF_OpenFont(symbolPathText.c_str(), 18.0f));
+                if (mathFallbackFont_
+                    && !TTF_AddFallbackFont(font_.get(), mathFallbackFont_.get()))
+                {
+                    std::cerr << "Rose symbol-font fallback could not be installed: "
+                        << SDL_GetError() << '\n';
+                    mathFallbackFont_.reset();
+                }
+            }
+        }
+#endif
 
 
         // -------------------------------------------------------------------------
@@ -365,6 +399,62 @@ namespace rose::ui
             SDL_StopTextInput(
                 window_.get());
         }
+
+        for (const auto& path : temporaryImages_)
+        {
+            std::error_code error;
+            std::filesystem::remove(path, error);
+        }
+    }
+
+
+    void SdlChatWindow::stageTemporaryImage(const std::filesystem::path& path)
+    {
+        temporaryImages_.push_back(path);
+        const auto utf8 = path.u8string();
+        const std::string pathText(
+            reinterpret_cast<const char*>(utf8.data()), utf8.size());
+        addDroppedFile(pathText.c_str());
+    }
+
+
+    void SdlChatWindow::stageScreenCapture()
+    {
+        try
+        {
+            if (auto path = captureDesktopImage())
+            {
+                const std::size_t attachmentsBefore = pendingAttachments_.size();
+                stageTemporaryImage(*path);
+                if (pendingAttachments_.size() == attachmentsBefore) return;
+                if (artifactCards_)
+                {
+                    artifactCards_->appendArtifact(artifacts::Artifact{
+                        .path = *path,
+                        .displayName = "Screen capture",
+                        .mediaType = "image/x-rose-screen-capture",
+                        .kind = artifacts::ArtifactKind::Image
+                    });
+                }
+                if (inputText_.empty())
+                {
+                    setDraftText("Analyze what is visible in this screen capture. "
+                        "Describe the active task, any error or warning, and the next concrete step. "
+                        "State when the image does not provide enough evidence.");
+                }
+                submitInput();
+            }
+            else
+            {
+                transcript_.push_back("Screen capture is available on Windows.");
+                transcriptDirty_ = true;
+            }
+        }
+        catch (const std::exception& exception)
+        {
+            transcript_.push_back(std::string{ "Screen capture failed: " } + exception.what());
+            transcriptDirty_ = true;
+        }
     }
 
 
@@ -526,6 +616,7 @@ namespace rose::ui
 
 
         refreshAttachmentSummaryText();
+        refreshStagedImagePreview();
     }
 
 
@@ -552,6 +643,7 @@ namespace rose::ui
 
         pendingAttachments_.erase(found);
         refreshAttachmentSummaryText();
+        refreshStagedImagePreview();
         return true;
     }
 
@@ -560,6 +652,46 @@ namespace rose::ui
     {
         pendingAttachments_.clear();
         refreshAttachmentSummaryText();
+        refreshStagedImagePreview();
+    }
+
+
+    void SdlChatWindow::refreshStagedImagePreview()
+    {
+        stagedImagePreview_.reset();
+        stagedImageWidth_ = 0.0f;
+        stagedImageHeight_ = 0.0f;
+        for (auto it = pendingAttachments_.rbegin();
+            it != pendingAttachments_.rend(); ++it)
+        {
+            if (!files::isImageFile(it->path)) continue;
+            const auto utf8 = it->path.u8string();
+            const std::string name(
+                reinterpret_cast<const char*>(utf8.data()), utf8.size());
+            // SDL3_image may be built with only PNG support. Clipboard and
+            // desktop captures can be BMP, which SDL itself can always decode.
+            if (it->path.extension() == ".bmp")
+            {
+                SDL_Surface* bitmap = SDL_LoadBMP(name.c_str());
+                if (bitmap)
+                {
+                    stagedImagePreview_.reset(
+                        SDL_CreateTextureFromSurface(renderer_.get(), bitmap));
+                    SDL_DestroySurface(bitmap);
+                }
+            }
+            else
+            {
+                stagedImagePreview_.reset(
+                    IMG_LoadTexture(renderer_.get(), name.c_str()));
+            }
+            if (stagedImagePreview_)
+            {
+                SDL_GetTextureSize(stagedImagePreview_.get(),
+                    &stagedImageWidth_, &stagedImageHeight_);
+                return;
+            }
+        }
     }
 
 
@@ -839,6 +971,7 @@ namespace rose::ui
                     {
                         pendingAttachments_.pop_back();
                         refreshAttachmentSummaryText();
+                        refreshStagedImagePreview();
                     }
                     else
                     {
@@ -1358,13 +1491,24 @@ namespace rose::ui
             6.0f
         };
 
+        const float stagedPreviewScale =
+            stagedImagePreview_ && stagedImageWidth_ > 0.0f
+                && stagedImageHeight_ > 0.0f
+                ? std::min(240.0f / stagedImageWidth_,
+                    110.0f / stagedImageHeight_)
+                : 0.0f;
+        const float stagedPreviewHeight =
+            stagedImageHeight_ * stagedPreviewScale;
+
 
         const float attachmentSectionHeight =
             pendingAttachments_.empty()
                 ? 0.0f
                 : static_cast<float>(
                     attachmentTextHeight)
-                    + attachmentTextBottomGap;
+                    + attachmentTextBottomGap
+                    + (stagedPreviewHeight > 0.0f
+                        ? stagedPreviewHeight + attachmentTextBottomGap : 0.0f);
 
 
         const float inputAreaHeight =
@@ -1864,6 +2008,21 @@ namespace rose::ui
             }
         }
 
+        if (stagedImagePreview_ && stagedPreviewHeight > 0.0f)
+        {
+            const SDL_FRect previewRect{
+                inputTextX,
+                attachmentTextY + static_cast<float>(attachmentTextHeight)
+                    + attachmentTextBottomGap,
+                stagedImageWidth_ * stagedPreviewScale,
+                stagedPreviewHeight
+            };
+            SDL_RenderTexture(renderer_.get(), stagedImagePreview_.get(),
+                nullptr, &previewRect);
+            SDL_SetRenderDrawColor(renderer_.get(), 184, 196, 214, 255);
+            SDL_RenderRect(renderer_.get(), &previewRect);
+        }
+
 
         const SDL_Rect inputClip{
             static_cast<int>(
@@ -2100,6 +2259,7 @@ namespace rose::ui
 
         pendingAttachments_.clear();
         refreshAttachmentSummaryText();
+        refreshStagedImagePreview();
 
 
         inputText_.clear();
@@ -3222,6 +3382,21 @@ namespace rose::ui
 
     void SdlChatWindow::pasteClipboardText()
     {
+        try
+        {
+            if (auto path = saveClipboardImage())
+            {
+                stageTemporaryImage(*path);
+                return;
+            }
+        }
+        catch (const std::exception& exception)
+        {
+            transcript_.push_back(std::string{ "Image paste failed: " } + exception.what());
+            transcriptDirty_ = true;
+            return;
+        }
+
         char* clipboardText =
             SDL_GetClipboardText();
 
@@ -3508,7 +3683,7 @@ namespace rose::ui
     {
         return
             textFocus_ == TextFocus::Composer
-            && SDL_HasClipboardText();
+            && (SDL_HasClipboardText() || hasClipboardImage());
     }
 
 
@@ -4891,6 +5066,13 @@ namespace rose::ui
             SDL_DestroyRenderer(
                 renderer);
         }
+    }
+
+
+    void SdlChatWindow::TextureDeleter::operator()(
+        SDL_Texture* texture) const noexcept
+    {
+        if (texture != nullptr) SDL_DestroyTexture(texture);
     }
 
     std::string SdlChatWindow::buildTranscriptText() const

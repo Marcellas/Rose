@@ -135,6 +135,7 @@ namespace rose::ui
             int renderHeight{ 0 };
 
             SDL_FRect lastClickRect{};
+            SDL_FRect closeRect{};
             bool hasClickableRegion{ false };
         };
 
@@ -170,17 +171,18 @@ namespace rose::ui
             const bool image =
                 artifact.kind
                 == artifacts::ArtifactKind::Image;
+            const bool screenCapture =
+                artifact.mediaType == "image/x-rose-screen-capture";
 
             return
                 std::string{
-                    image
-                        ? "Generated image: "
-                        : "Created file: "
+                    screenCapture ? "Screen capture: "
+                        : image ? "Generated image: " : "Created file: "
                 }
                 + artifact.displayName
                 + "\n"
                 + artifact.path.string()
-                + "\nLeft-click to open; right-click to reveal in Explorer.";
+                + "\nLeft-click to open; right-click to reveal; X closes preview.";
         }
 
 
@@ -234,10 +236,20 @@ namespace rose::ui
                 const std::string pathText =
                     card.artifact.path.string();
 
-                SDL_Texture* rawTexture =
-                    IMG_LoadTexture(
-                        &renderer_,
-                        pathText.c_str());
+                SDL_Texture* rawTexture{ nullptr };
+                if (card.artifact.path.extension() == ".bmp")
+                {
+                    SDL_Surface* bitmap = SDL_LoadBMP(pathText.c_str());
+                    if (bitmap != nullptr)
+                    {
+                        rawTexture = SDL_CreateTextureFromSurface(&renderer_, bitmap);
+                        SDL_DestroySurface(bitmap);
+                    }
+                }
+                else
+                {
+                    rawTexture = IMG_LoadTexture(&renderer_, pathText.c_str());
+                }
 
                 if (rawTexture != nullptr)
                 {
@@ -500,8 +512,9 @@ namespace rose::ui
                 return false;
             }
 
-            for (Card& card : cards_)
+            for (auto it = cards_.begin(); it != cards_.end(); ++it)
             {
+                Card& card = *it;
                 if (
                     card.hasClickableRegion
                     && pointInside(
@@ -509,6 +522,15 @@ namespace rose::ui
                         x,
                         y))
                 {
+                    if (!revealFolder && pointInside(card.closeRect, x, y))
+                    {
+                        // Dismiss only the UI preview. ArtifactStore retains the
+                        // generated file and the transcript retains its message.
+                        cards_.erase(it);
+                        followLatest_ = true;
+                        return true;
+                    }
+
                     if (revealFolder)
                     {
                         revealArtifact(
@@ -653,6 +675,13 @@ namespace rose::ui
                     card.lastClickRect =
                         cardRect;
 
+                    card.closeRect = SDL_FRect{
+                        cardRect.x + cardRect.w - 28.0f,
+                        cardRect.y + 6.0f,
+                        20.0f,
+                        20.0f
+                    };
+
                     card.hasClickableRegion =
                         true;
 
@@ -696,6 +725,19 @@ namespace rose::ui
                             nullptr,
                             &destination);
                     }
+
+                    // Draw the close button last: a wrapped path/label can extend
+                    // into the top-right corner and previously painted over X.
+                    SDL_SetRenderDrawColor(&renderer_, 95, 42, 62, 255);
+                    SDL_RenderFillRect(&renderer_, &card.closeRect);
+                    SDL_SetRenderDrawColor(&renderer_, 247, 239, 245, 255);
+                    SDL_RenderRect(&renderer_, &card.closeRect);
+                    SDL_RenderLine(&renderer_,
+                        card.closeRect.x + 5.0f, card.closeRect.y + 5.0f,
+                        card.closeRect.x + 15.0f, card.closeRect.y + 15.0f);
+                    SDL_RenderLine(&renderer_,
+                        card.closeRect.x + 15.0f, card.closeRect.y + 5.0f,
+                        card.closeRect.x + 5.0f, card.closeRect.y + 15.0f);
                 }
 
                 cursorY =

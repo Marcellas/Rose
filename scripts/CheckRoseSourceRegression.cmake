@@ -433,12 +433,17 @@ rose_require_source_text(
 rose_require_source_text(
     "src/avatar/SdlAvatar.cpp"
     "frameBlendForElapsed"
-    "60 Hz temporal interpolation for low-FPS avatar atlases")
+    "low-FPS avatar frame timing")
 
 rose_require_source_text(
     "src/avatar/SdlAvatar.cpp"
-    "Do NOT dim both neighboring frames at the same time"
-    "opacity-preserving avatar frame interpolation")
+    "clip.frameTextures.push_back(std::move(frameTexture))"
+    "isolated textures for atlas cells")
+
+rose_require_source_text(
+    "src/avatar/SdlAvatar.cpp"
+    "clip->frameTextures[static_cast<std::size_t>(renderedFrameIndex_)]"
+    "one displayed source frame without cross-fade ghosts")
 
 rose_require_source_text(
     "src/avatar/SdlAvatar.cpp"

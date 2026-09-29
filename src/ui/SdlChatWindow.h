@@ -19,6 +19,7 @@
 
 struct SDL_Window;
 struct SDL_Renderer;
+struct SDL_Texture;
 union SDL_Event;
 struct TTF_Font;
 struct TTF_TextEngine;
@@ -86,6 +87,10 @@ namespace rose::ui
         // this to guide the user into an existing conversational workflow.
         void setDraftText(std::string text);
 
+        // Explicit menu action captures and submits a timestamped image for
+        // analysis; ordinary clipboard paste only stages a preview.
+        void stageScreenCapture();
+
 
     private:
         struct FontDeleter
@@ -119,6 +124,11 @@ namespace rose::ui
                 SDL_Renderer* renderer) const noexcept;
         };
 
+        struct TextureDeleter
+        {
+            void operator()(SDL_Texture* texture) const noexcept;
+        };
+
         using FontPtr =
             std::unique_ptr<
             TTF_Font,
@@ -144,6 +154,8 @@ namespace rose::ui
             std::unique_ptr<
             SDL_Renderer,
             RendererDeleter>;
+
+        using TexturePtr = std::unique_ptr<SDL_Texture, TextureDeleter>;
 
         [[nodiscard]]
         std::string buildTranscriptText() const;
@@ -173,6 +185,7 @@ namespace rose::ui
         void clearPendingAttachments();
 
         void refreshAttachmentSummaryText();
+        void refreshStagedImagePreview();
 
         [[nodiscard]]
         std::string pendingAttachmentSummary() const;
@@ -329,6 +342,7 @@ namespace rose::ui
         void cutInputSelectionToClipboard();
 
         void pasteClipboardText();
+        void stageTemporaryImage(const std::filesystem::path& path);
 
 
         // -------------------------------------------------------------------------
@@ -500,6 +514,9 @@ namespace rose::ui
         // The text must disappear before the font/text engine, and the renderer-backed
         // text engine must disappear before the SDL renderer.
 
+        // The Windows symbol fallback outlives the primary font because SDL_ttf
+        // borrows it for glyphs such as forall/exists missing from Segoe UI.
+        FontPtr mathFallbackFont_;
         FontPtr font_;
 
         TextEnginePtr textEngine_;
@@ -561,6 +578,10 @@ namespace rose::ui
         // Files dropped onto the chat window but not yet submitted. This list is
         // session/UI state only and is moved into one UserSubmission on Enter.
         std::vector<input::FileAttachment> pendingAttachments_;
+        std::vector<std::filesystem::path> temporaryImages_;
+        TexturePtr stagedImagePreview_;
+        float stagedImageWidth_{ 0.0f };
+        float stagedImageHeight_{ 0.0f };
 
         std::vector<std::string> transcript_;
 

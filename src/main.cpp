@@ -78,6 +78,7 @@
 #include "tools/MovePathTool.h"
 #include "tools/RecyclePathTool.h"
 #include "tools/ScanDirectoryTreeTool.h"
+#include "tools/SearchLocalFilesTool.h"
 #include "tools/ReadFileTool.h"
 #include "tools/ReadTextFileRegisteredTool.h"
 #include "tools/ReadPdfRegisteredTool.h"
@@ -490,8 +491,8 @@ int main()
 
         rose::avatar::SdlAvatar avatar{
             sdlRuntime,
-            320,
-            300
+            400,
+            380
         };
 
         avatar.loadSprite(
@@ -1184,6 +1185,10 @@ int main()
                     toolRegistry.registerTool(
                         std::make_unique<
                             rose::tools::ScanDirectoryTreeTool>());
+
+                    toolRegistry.registerTool(
+                        std::make_unique<
+                            rose::tools::SearchLocalFilesTool>());
 
                     // ZIP lifecycle: inspect is read-only; extract/create are
                     // local writes and therefore confirmation-gated. All three
@@ -4408,12 +4413,15 @@ int main()
                 switch (command.action)
                 {
                 case Action::Interact:
-                    // A primary click means "interact with Rose", not "open chat".
-                    // This temporary acknowledgement is presentation-only and does
-                    // not overwrite RoseCore's semantic activity state.
-                    avatarPreview.preview(
-                        State::Notification,
-                        std::chrono::milliseconds{ 1100 });
+                    // A click acknowledges the user without triggering the spell
+                    // notification clip. Extra taps during the same acknowledgement
+                    // do not restart the stand-up/preview timeline.
+                    if (!avatarPreview.active())
+                    {
+                        avatarPreview.preview(
+                            State::Listening,
+                            std::chrono::milliseconds{ 1300 });
+                    }
                     break;
 
                 case Action::ShowChat:
@@ -4535,6 +4543,17 @@ int main()
                     chatWindow.setDraftText("/outlook status");
                     break;
 
+                case Action::SearchOffline:
+                    showChat();
+                    chatWindow.setDraftText(
+                        "Search offline for \"<terms>\" in \"<absolute folder>\"");
+                    break;
+
+                case Action::AnalyzeScreen:
+                    chatWindow.stageScreenCapture();
+                    showChat();
+                    break;
+
                 case Action::AnimationDemo:
                     avatarPreview.startDemo();
                     break;
@@ -4574,7 +4593,6 @@ int main()
                 // desktop-assistant god object.
                 case Action::RecentChats:
                 case Action::SearchOnline:
-                case Action::SearchOffline:
                 case Action::Settings:
                 case Action::None:
                     break;

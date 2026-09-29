@@ -299,7 +299,7 @@ namespace rose::avatar
 
         SDL_Texture* texture =
             clip != nullptr
-                ? clip->texture.get()
+                ? clip->frameTextures.front().get()
                 : spriteTexture_.get();
 
         if (texture != nullptr)
@@ -363,10 +363,13 @@ namespace rose::avatar
                 static_cast<float>(
                     outputHeight);
 
+            // Give rotation, bounce, and an expanding posture room inside the
+            // actual window rectangle. A shaped window cannot draw beyond it.
+            constexpr float motionInset = 40.0f;
             const float baseScale =
                 std::min(
-                    availableWidth / visualWidth,
-                    availableHeight / visualHeight);
+                    std::max(1.0f, availableWidth - motionInset * 2.0f) / visualWidth,
+                    std::max(1.0f, availableHeight - motionInset * 2.0f) / visualHeight);
 
             const float animatedScale =
                 baseScale
@@ -409,195 +412,28 @@ namespace rose::avatar
                             : frameBlend.firstFrame)
                     : 0;
 
-
-            const auto renderFrame =
-                [this,
-                 texture,
-                 &destination,
-                 &transform](
-                    const SDL_FRect* source)
-                {
-                    if (!SDL_RenderTextureRotated(
-                        renderer_.get(),
-                        texture,
-                        source,
-                        &destination,
-                        transform.rotationDegrees,
-                        nullptr,
-                        SDL_FLIP_NONE))
-                    {
-                        throw std::runtime_error{
-                            std::string{
-                                "Could not render animated Rose avatar: "
-                            }
-                            + SDL_GetError()
-                        };
-                    }
-                };
+            updateWindowShape(
+                clip,
+                renderedFrameIndex_,
+                renderedFrameIndex_,
+                outputWidth,
+                outputHeight);
 
 
-            const auto setFrameAlpha =
-                [this,
-                 texture](
-                    const Uint8 alpha) noexcept
-                {
-                    if (!temporalBlendAvailable_)
-                    {
-                        return false;
-                    }
-
-                    if (!SDL_SetTextureAlphaMod(
-                        texture,
-                        alpha))
-                    {
-                        // Alpha modulation is optional SDL renderer capability.
-                        // Disable interpolation for the rest of the process and
-                        // continue with ordinary source-frame rendering.
-                        temporalBlendAvailable_ = false;
-                        return false;
-                    }
-
-                    return true;
-                };
-
-
-            if (clip == nullptr)
+            // Cross-fading two separate silhouettes produces a second ghost pose
+            // (including authoring artifacts already baked into either source).
+            // Select one frame and let the presentation timeline control timing.
+            SDL_Texture* frameTexture = clip != nullptr
+                ? clip->frameTextures[static_cast<std::size_t>(renderedFrameIndex_)].get()
+                : texture;
+            if (!SDL_RenderTextureRotated(
+                renderer_.get(), frameTexture, nullptr, &destination,
+                transform.rotationDegrees, nullptr, SDL_FLIP_NONE))
             {
-                // The still fallback is always rendered at full alpha. Ignore an
-                // alpha-modulation failure because this renderer may simply not
-                // support modulation at all.
-                SDL_SetTextureAlphaMod(
-                    texture,
-                    255);
-
-                renderFrame(
-                    nullptr);
-            }
-            else
-            {
-                const SDL_FRect firstSource =
-                    sourceRectForFrame(
-                        *clip,
-                        frameBlend.firstFrame);
-
-                const bool canBlend =
-                    temporalBlendAvailable_
-                    && frameBlend.secondFrame
-                        != frameBlend.firstFrame
-                    && frameBlend.blend > 0.001f;
-
-                if (!canBlend)
-                {
-                    SDL_SetTextureAlphaMod(
-                        texture,
-                        255);
-
-                    renderFrame(
-                        &firstSource);
-                }
-                else
-                {
-                    const SDL_FRect secondSource =
-                        sourceRectForFrame(
-                            *clip,
-                            frameBlend.secondFrame);
-
-                    const float blend =
-                        std::clamp(
-                            frameBlend.blend,
-                            0.0f,
-                            1.0f);
-
-                    // Do NOT dim both neighboring frames at the same time.
-                    //
-                    // The Batch 14 implementation rendered frame A at (1-t) alpha
-                    // and frame B at t alpha over a transparent window. With
-                    // ordinary source-over alpha composition, two 50%-opaque
-                    // copies produce only 75% final opacity even where the artwork
-                    // overlaps perfectly. That made Rose's dark hat, shoes, and
-                    // outfit visibly blink/translucent during every interpolation.
-                    //
-                    // Instead, keep one side of the transition fully opaque while
-                    // the neighboring source frame fades in/out. Shared pixels
-                    // therefore always have at least one full-opacity source, while
-                    // differing silhouettes can still dissolve smoothly at their
-                    // edges. This is not optical-flow morphing, but it removes the
-                    // transparency flash without adding a video/interpolation
-                    // dependency to the runtime.
-                    const bool firstHalf =
-                        blend < 0.5f;
-
-                    const float halfBlend =
-                        firstHalf
-                            ? std::clamp(
-                                blend * 2.0f,
-                                0.0f,
-                                1.0f)
-                            : std::clamp(
-                                (blend - 0.5f) * 2.0f,
-                                0.0f,
-                                1.0f);
-
-                    const Uint8 firstAlpha =
-                        firstHalf
-                            ? static_cast<Uint8>(255)
-                            : static_cast<Uint8>(
-                                (1.0f - halfBlend)
-                                * 255.0f);
-
-                    const Uint8 secondAlpha =
-                        firstHalf
-                            ? static_cast<Uint8>(
-                                halfBlend
-                                * 255.0f)
-                            : static_cast<Uint8>(255);
-
-                    const bool firstAlphaApplied =
-                        setFrameAlpha(
-                            firstAlpha);
-
-                    if (!firstAlphaApplied)
-                    {
-                        SDL_SetTextureAlphaMod(
-                            texture,
-                            255);
-
-                        renderFrame(
-                            &firstSource);
-                    }
-                    else
-                    {
-                        renderFrame(
-                            &firstSource);
-
-                        if (setFrameAlpha(
-                            secondAlpha))
-                        {
-                            renderFrame(
-                                &secondSource);
-                        }
-                        else
-                        {
-                            // The first source may have been drawn partially
-                            // transparent in the second half. Repaint it fully opaque
-                            // so renderer capability failure cannot expose the
-                            // transparent desktop background for one frame.
-                            SDL_SetTextureAlphaMod(
-                                texture,
-                                255);
-
-                            renderFrame(
-                                &firstSource);
-                        }
-                    }
-                }
-
-                // Alpha modulation is texture state. Best-effort restoration is
-                // enough here: if unsupported, temporalBlendAvailable_ is already
-                // false and future frames use hard source-frame rendering.
-                SDL_SetTextureAlphaMod(
-                    texture,
-                    255);
+                throw std::runtime_error{
+                    std::string{ "Could not render animated Rose avatar: " }
+                    + SDL_GetError()
+                };
             }
         }
         else
@@ -801,104 +637,7 @@ namespace rose::avatar
         spriteHeight_ =
             static_cast<float>(
                 spritePixelHeight_);
-
-        int windowWidth{ 0 };
-        int windowHeight{ 0 };
-
-
-        if (!SDL_GetWindowSize(
-            window_.get(),
-            &windowWidth,
-            &windowHeight))
-        {
-            throw std::runtime_error{
-                std::string{
-                    "Could not query Rose window size: "
-                }
-                + SDL_GetError()
-            };
-        }
-
-
-        SurfacePtr windowShape{
-            SDL_CreateSurface(
-                windowWidth,
-                windowHeight,
-                SDL_PIXELFORMAT_RGBA32)
-        };
-
-
-        if (!windowShape)
-        {
-            throw std::runtime_error{
-                std::string{
-                    "Could not create Rose window shape surface: "
-                }
-                + SDL_GetError()
-            };
-        }
-
-        const float scale =
-            std::min(
-                static_cast<float>(
-                    windowWidth)
-                / spriteWidth_,
-
-                static_cast<float>(
-                    windowHeight)
-                / spriteHeight_);
-
-
-        const int shapeWidth =
-            static_cast<int>(
-                spriteWidth_
-                * scale);
-
-
-        const int shapeHeight =
-            static_cast<int>(
-                spriteHeight_
-                * scale);
-
-
-        const SDL_Rect destination{
-            (windowWidth - shapeWidth)
-                / 2,
-
-            (windowHeight - shapeHeight)
-                / 2,
-
-            shapeWidth,
-            shapeHeight
-        };
-
-        if (!SDL_BlitSurfaceScaled(
-            surface.get(),
-            nullptr,
-            windowShape.get(),
-            &destination,
-            SDL_SCALEMODE_LINEAR))
-        {
-            throw std::runtime_error{
-                std::string{
-                    "Could not build Rose window silhouette: "
-                }
-                + SDL_GetError()
-            };
-        }
-
-        if (!SDL_SetWindowShape(
-            window_.get(),
-            windowShape.get()))
-        {
-            throw std::runtime_error{
-                std::string{
-                    "Could not apply Rose window silhouette: "
-                }
-                + SDL_GetError()
-            };
-        }
-
+        shapeFirstFrame_ = -1;
     }
 
     SdlAvatar::AnimationClip SdlAvatar::loadAnimationClip(
@@ -1034,19 +773,43 @@ namespace rose::avatar
             }
         }
 
-        clip.texture.reset(
-            SDL_CreateTextureFromSurface(
-                renderer_.get(),
-                surface.get()));
-
-        if (!clip.texture)
+        if (!SDL_SetSurfaceBlendMode(surface.get(), SDL_BLENDMODE_NONE))
         {
             throw std::runtime_error{
-                std::string{
-                    "Could not create Rose animation texture: "
-                }
-                + SDL_GetError()
+                std::string{ "Could not copy Rose atlas alpha: " } + SDL_GetError()
             };
+        }
+        clip.frameTextures.reserve(static_cast<std::size_t>(frameCount));
+        for (int frame = 0; frame < frameCount; ++frame)
+        {
+            SurfacePtr isolated{
+                SDL_CreateSurface(clip.frameWidth, clip.frameHeight,
+                    SDL_PIXELFORMAT_RGBA32)
+            };
+            const SDL_Rect source{
+                (frame % columns) * clip.frameWidth,
+                (frame / columns) * clip.frameHeight,
+                clip.frameWidth, clip.frameHeight
+            };
+            if (!isolated || !SDL_BlitSurface(surface.get(), &source,
+                isolated.get(), nullptr))
+            {
+                throw std::runtime_error{
+                    std::string{ "Could not isolate Rose animation frame: " }
+                    + SDL_GetError()
+                };
+            }
+            TexturePtr frameTexture{
+                SDL_CreateTextureFromSurface(renderer_.get(), isolated.get())
+            };
+            if (!frameTexture)
+            {
+                throw std::runtime_error{
+                    std::string{ "Could not create Rose animation frame texture: " }
+                    + SDL_GetError()
+                };
+            }
+            clip.frameTextures.push_back(std::move(frameTexture));
         }
 
         return clip;
@@ -1302,30 +1065,10 @@ namespace rose::avatar
                 0.0f,
                 1.0f);
 
-        // Hold the source pose for roughly the first third of each interval, then
-        // ease the next frame in. This avoids a constant ghosted/double-image look
-        // while removing the abrupt 7-8 FPS frame jumps that made Batch 13 feel
-        // unnaturally fast.
-        constexpr float blendStart{
-            0.35f
-        };
-
-        const float normalizedBlend =
-            std::clamp(
-                (fractional - blendStart)
-                / (1.0f - blendStart),
-                0.0f,
-                1.0f);
-
-        const float easedBlend =
-            normalizedBlend
-            * normalizedBlend
-            * (3.0f - 2.0f * normalizedBlend);
-
         return FrameBlend{
             .firstFrame = firstFrame,
             .secondFrame = secondFrame,
-            .blend = easedBlend
+            .blend = fractional
         };
     }
 
@@ -1385,41 +1128,154 @@ namespace rose::avatar
     }
 
 
-    SDL_FRect SdlAvatar::sourceRectForFrame(
-        const AnimationClip& clip,
-        const int frameIndex) noexcept
+    void SdlAvatar::updateWindowShape(
+        const AnimationClip* clip,
+        const int firstFrame,
+        const int secondFrame,
+        const int outputWidth,
+        const int outputHeight)
     {
-        const int safeFrameIndex =
-            std::clamp(
-                frameIndex,
-                0,
-                std::max(
-                    0,
-                    clip.frameCount - 1));
+        int width{ 0 };
+        int height{ 0 };
+        if (!SDL_GetWindowSize(window_.get(), &width, &height)
+            || width <= 0 || height <= 0)
+        {
+            throw std::runtime_error{
+                std::string{ "Could not query Rose window shape size: " }
+                + SDL_GetError()
+            };
+        }
 
-        const int column =
-            safeFrameIndex
-            % clip.columns;
+        if (clip == shapeClip_
+            && firstFrame == shapeFirstFrame_
+            && secondFrame == shapeSecondFrame_
+            && width == shapeWidth_
+            && height == shapeHeight_
+            && outputWidth == shapeOutputWidth_
+            && outputHeight == shapeOutputHeight_)
+        {
+            return;
+        }
 
-        const int row =
-            safeFrameIndex
-            / clip.columns;
-
-        return SDL_FRect{
-            static_cast<float>(
-                column
-                * clip.frameWidth),
-
-            static_cast<float>(
-                row
-                * clip.frameHeight),
-
-            static_cast<float>(
-                clip.frameWidth),
-
-            static_cast<float>(
-                clip.frameHeight)
+        SurfacePtr shape{
+            SDL_CreateSurface(width, height, SDL_PIXELFORMAT_RGBA32)
         };
+
+        if (!shape)
+        {
+            throw std::runtime_error{
+                std::string{ "Could not create Rose animation window shape: " }
+                + SDL_GetError()
+            };
+        }
+
+        // Count occupied pixels in a summed-area table. The two source frames
+        // both contribute because they may be cross-faded on this presentation
+        // interval. A margin accommodates Rose's subtle UI transforms without
+        // rebuilding a Windows region on every 60 Hz render.
+        const int stride = width + 1;
+        std::vector<std::uint32_t> occupied(
+            static_cast<std::size_t>(stride)
+            * static_cast<std::size_t>(height + 1), 0);
+
+        constexpr double pi{ 3.14159265358979323846 };
+        const double radians = -renderedPose_.rotationDegrees * pi / 180.0;
+        const float cosine = static_cast<float>(std::cos(radians));
+        const float sine = static_cast<float>(std::sin(radians));
+        const float centerX = renderedPose_.x + renderedPose_.width * 0.5f;
+        const float centerY = renderedPose_.y + renderedPose_.height * 0.5f;
+        const int sourceWidth = clip ? clip->frameWidth : spritePixelWidth_;
+        const int sourceHeight = clip ? clip->frameHeight : spritePixelHeight_;
+
+        const auto alphaAt = [&](const int frame, const int x, const int y)
+        {
+            if (clip)
+            {
+                const int column = frame % clip->columns;
+                const int row = frame / clip->columns;
+                const auto index = static_cast<std::size_t>(
+                    (row * clip->frameHeight + y) * clip->atlasWidth
+                    + column * clip->frameWidth + x);
+                return clip->alpha[index];
+            }
+
+            return spriteAlpha_[static_cast<std::size_t>(
+                y * spritePixelWidth_ + x)];
+        };
+
+        for (int y = 0; y < height; ++y)
+        {
+            std::uint32_t rowSum{ 0 };
+            for (int x = 0; x < width; ++x)
+            {
+                const float relativeX =
+                    (static_cast<float>(x) + 0.5f) * outputWidth / width - centerX;
+                const float relativeY =
+                    (static_cast<float>(y) + 0.5f) * outputHeight / height - centerY;
+                const float localX = relativeX * cosine - relativeY * sine
+                    + renderedPose_.width * 0.5f;
+                const float localY = relativeX * sine + relativeY * cosine
+                    + renderedPose_.height * 0.5f;
+
+                if (localX >= 0.0f && localY >= 0.0f
+                    && localX < renderedPose_.width
+                    && localY < renderedPose_.height)
+                {
+                    const int sx = std::min(sourceWidth - 1,
+                        static_cast<int>(localX / renderedPose_.width * sourceWidth));
+                    const int sy = std::min(sourceHeight - 1,
+                        static_cast<int>(localY / renderedPose_.height * sourceHeight));
+                    rowSum += alphaAt(firstFrame, sx, sy) > 0
+                        || alphaAt(secondFrame, sx, sy) > 0;
+                }
+
+                occupied[static_cast<std::size_t>(y + 1) * stride + x + 1] =
+                    occupied[static_cast<std::size_t>(y) * stride + x + 1]
+                    + rowSum;
+            }
+        }
+
+        constexpr int motionMargin{ 18 };
+        for (int y = 0; y < height; ++y)
+        {
+            const int top = std::max(0, y - motionMargin);
+            const int bottom = std::min(height, y + motionMargin + 1);
+            for (int x = 0; x < width; ++x)
+            {
+                const int left = std::max(0, x - motionMargin);
+                const int right = std::min(width, x + motionMargin + 1);
+                const auto count =
+                    occupied[static_cast<std::size_t>(bottom) * stride + right]
+                    - occupied[static_cast<std::size_t>(top) * stride + right]
+                    - occupied[static_cast<std::size_t>(bottom) * stride + left]
+                    + occupied[static_cast<std::size_t>(top) * stride + left];
+
+                if (!SDL_WriteSurfacePixel(shape.get(), x, y,
+                    255, 255, 255, count > 0 ? 255 : 0))
+                {
+                    throw std::runtime_error{
+                        std::string{ "Could not write Rose window shape: " }
+                        + SDL_GetError()
+                    };
+                }
+            }
+        }
+
+        if (!SDL_SetWindowShape(window_.get(), shape.get()))
+        {
+            throw std::runtime_error{
+                std::string{ "Could not update Rose animation window shape: " }
+                + SDL_GetError()
+            };
+        }
+
+        shapeClip_ = clip;
+        shapeFirstFrame_ = firstFrame;
+        shapeSecondFrame_ = secondFrame;
+        shapeWidth_ = width;
+        shapeHeight_ = height;
+        shapeOutputWidth_ = outputWidth;
+        shapeOutputHeight_ = outputHeight;
     }
 
 

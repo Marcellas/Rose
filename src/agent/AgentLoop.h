@@ -7,6 +7,7 @@
 #include "agent/RepairValidationReplay.h"
 #include "agent/RepairOutcomeTracker.h"
 #include "agent/ToolConfirmation.h"
+#include "agent/ScopedReadApproval.h"
 #include "agent/AgentJournal.h"
 #include "artifacts/Artifact.h"
 #include "tools/ToolTypes.h"
@@ -57,6 +58,11 @@ namespace rose::agent
         // Verbatim earlier user messages from one unresolved tool-backed task.
         // This is user authority only; assistant prose is never stored here.
         std::string priorUserTaskContext;
+
+        // One confirmed read of a directory grants further read-only inspection
+        // inside that exact canonical root for this bounded run only. Writes,
+        // process/network tools, and paths outside it still need confirmation.
+        std::optional<ScopedReadApproval> approvedReadScope;
 
         // Latest Rose-owned structured metadata from a completed tool. This is
         // kept separate from ordinary transientContext so untrusted tool/file

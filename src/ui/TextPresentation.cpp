@@ -124,7 +124,7 @@ namespace rose::ui
             using Entry =
                 std::pair<std::string_view, std::string_view>;
 
-            static constexpr std::array<Entry, 39> replacements{
+            static constexpr std::array<Entry, 72> replacements{
                 Entry{ "alpha", "α" },
                 Entry{ "beta", "β" },
                 Entry{ "gamma", "γ" },
@@ -163,7 +163,40 @@ namespace rose::ui
                 Entry{ "leftarrow", "←" },
                 Entry{ "leftrightarrow", "↔" },
                 Entry{ "degree", "°" },
-                Entry{ "partial", "∂" }
+                Entry{ "partial", "∂" },
+                Entry{ "forall", "∀" },
+                Entry{ "exists", "∃" },
+                Entry{ "nexists", "∄" },
+                Entry{ "in", "∈" },
+                Entry{ "notin", "∉" },
+                Entry{ "emptyset", "∅" },
+                Entry{ "varnothing", "∅" },
+                Entry{ "land", "∧" },
+                Entry{ "wedge", "∧" },
+                Entry{ "lor", "∨" },
+                Entry{ "vee", "∨" },
+                Entry{ "neg", "¬" },
+                Entry{ "lnot", "¬" },
+                Entry{ "implies", "⇒" },
+                Entry{ "Rightarrow", "⇒" },
+                Entry{ "iff", "⇔" },
+                Entry{ "Leftrightarrow", "⇔" },
+                Entry{ "subset", "⊂" },
+                Entry{ "subseteq", "⊆" },
+                Entry{ "supset", "⊃" },
+                Entry{ "supseteq", "⊇" },
+                Entry{ "cup", "∪" },
+                Entry{ "cap", "∩" },
+                Entry{ "sum", "∑" },
+                Entry{ "prod", "∏" },
+                Entry{ "int", "∫" },
+                Entry{ "nabla", "∇" },
+                Entry{ "equiv", "≡" },
+                Entry{ "propto", "∝" },
+                Entry{ "therefore", "∴" },
+                Entry{ "le", "≤" },
+                Entry{ "ge", "≥" },
+                Entry{ "to", "→" }
             };
 
             const auto found =

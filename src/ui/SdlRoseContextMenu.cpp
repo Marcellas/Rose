@@ -562,7 +562,8 @@ namespace rose::ui
                 { "Integrations / permissions", RoseUiAction::Integrations },
                 { "Outlook mail", RoseUiAction::Email },
                 { "Search online (coming soon)", RoseUiAction::SearchOnline, {}, false },
-                { "Search offline (coming soon)", RoseUiAction::SearchOffline, {}, false }
+                { "Search offline", RoseUiAction::SearchOffline },
+                { "Analyze current screen", RoseUiAction::AnalyzeScreen }
             };
             break;
 

@@ -74,9 +74,8 @@ namespace rose::avatar
         [[nodiscard]]
         std::vector<AvatarInteractionEvent> takeInteractions();
 
-        // Fallback still image. It is also used to establish the window shape so
-        // Rose remains draggable/click-through even if every animation asset is
-        // missing.
+        // Fallback still image. The window shape follows the displayed animation
+        // frames, or this image when an animation is unavailable.
         void loadSprite(
             const std::filesystem::path& path);
 
@@ -153,7 +152,9 @@ namespace rose::avatar
 
         struct AnimationClip
         {
-            TexturePtr texture;
+            // Each GPU texture owns one cell. Scaling an atlas subrectangle can
+            // otherwise filter RGB/alpha from the neighboring animation cell.
+            std::vector<TexturePtr> frameTextures;
             std::vector<std::uint8_t> alpha;
 
             int atlasWidth{ 0 };
@@ -167,10 +168,8 @@ namespace rose::avatar
             bool loop{ true };
         };
 
-        // Two neighboring source frames plus a temporal blend amount. Rose's
-        // authoring clips are only 7-8 FPS; blending at the 60 Hz presentation
-        // rate creates perceptual in-between frames without multiplying atlas
-        // memory or adding a video decoder.
+        // Timeline position between two authored frames. The renderer selects one
+        // source frame, avoiding the ghost silhouette from alpha cross-fades.
         struct FrameBlend
         {
             int firstFrame{ 0 };
@@ -210,11 +209,6 @@ namespace rose::avatar
             float normalizedProgress) noexcept;
 
         [[nodiscard]]
-        static SDL_FRect sourceRectForFrame(
-            const AnimationClip& clip,
-            int frameIndex) noexcept;
-
-        [[nodiscard]]
         AvatarTransform calculateTransform(
             AvatarState state,
             float elapsedSeconds) const;
@@ -223,6 +217,16 @@ namespace rose::avatar
         bool isSpritePixelAt(
             float windowX,
             float windowY) const noexcept;
+
+        // SDL's shaped window clips rendering as well as mouse input. Refresh its
+        // alpha mask when the visible source frames change; a small margin covers
+        // the subpixel breathing/sway transforms between those changes.
+        void updateWindowShape(
+            const AnimationClip* clip,
+            int firstFrame,
+            int secondFrame,
+            int width,
+            int height);
 
         // Latest semantic activity requested by the worker thread. The UI thread
         // consumes this through presentationTimeline_, which is free to finish
@@ -275,10 +279,13 @@ namespace rose::avatar
         const AnimationClip* renderedClip_{ nullptr };
         int renderedFrameIndex_{ 0 };
 
-        // Temporal cross-fading is optional presentation polish. If the active SDL
-        // renderer does not support texture alpha modulation, disable blending and
-        // continue with the slower source-frame timing rather than failing Rose.
-        bool temporalBlendAvailable_{ true };
+        const AnimationClip* shapeClip_{ nullptr };
+        int shapeFirstFrame_{ -1 };
+        int shapeSecondFrame_{ -1 };
+        int shapeWidth_{ 0 };
+        int shapeHeight_{ 0 };
+        int shapeOutputWidth_{ 0 };
+        int shapeOutputHeight_{ 0 };
 
         // Window dragging uses global desktop coordinates so moving the window does
         // not change the coordinate system being measured.

@@ -10,6 +10,18 @@ project(
 # run targeted validation independently from compilation.
 enable_testing()
 
+add_executable(RoseSearchAndApprovalTest
+    src/tools/SearchAndApproval_test.cpp
+    src/tools/SearchLocalFilesTool.cpp
+    src/tools/ToolRegistry.cpp
+    src/agent/CapabilityRoutingGuard.cpp
+    src/files/FileFormatCatalog.cpp
+    src/permissions/ToolExecutionPolicy.cpp
+    src/ui/TextPresentation.cpp)
+target_include_directories(RoseSearchAndApprovalTest PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
+target_compile_features(RoseSearchAndApprovalTest PRIVATE cxx_std_20)
+add_test(NAME RoseSearchAndApprovalTest COMMAND RoseSearchAndApprovalTest)
+
 
 # =============================================================================
 # Rose-owned target helpers
@@ -579,6 +591,8 @@ add_executable(
     src/agent/CapabilityRoutingGuard.cpp
     src/agent/ToolSelectionAgent.h
     src/agent/ToolSelectionAgent.cpp
+    src/agent/ReadWindowArguments.h
+    src/agent/ScopedReadApproval.h
     src/agent/UserTaskContinuation.h
     src/agent/UserTaskContinuation.cpp
     src/agent/ToolObservation.h
@@ -928,6 +942,8 @@ add_executable(
     src/tools/ListDirectoryTool.cpp
     src/tools/ScanDirectoryTreeTool.h
     src/tools/ScanDirectoryTreeTool.cpp
+    src/tools/SearchLocalFilesTool.h
+    src/tools/SearchLocalFilesTool.cpp
     src/tools/ListZipArchiveTool.h
     src/tools/ListZipArchiveTool.cpp
     src/tools/ExtractZipArchiveTool.h
@@ -1000,6 +1016,8 @@ add_executable(
 
     src/ui/SdlChatWindow.h
     src/ui/SdlChatWindow.cpp
+    src/ui/ScreenImageCapture.h
+    src/ui/ScreenImageCapture.cpp
 
     src/ui/TextPresentation.h
     src/ui/TextPresentation.cpp
@@ -1029,6 +1047,7 @@ if(WIN32)
         PRIVATE
             LaTeX
             gdiplus
+            gdi32
             shell32
             advapi32
             winhttp

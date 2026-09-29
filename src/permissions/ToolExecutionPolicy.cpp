@@ -53,6 +53,15 @@ namespace rose::permissions
             };
         }
 
+        if (confirmation == ToolConfirmationState::ScopedReadApproved
+            && descriptor.risk == tools::ToolRisk::ReadOnly)
+        {
+            return ToolExecutionDecision{
+                .disposition = ToolExecutionDisposition::Allowed,
+                .reason = "Read is inside the directory approved for this agent run."
+            };
+        }
+
         if (explicitlyConfirmed)
         {
             return ToolExecutionDecision{
