@@ -639,11 +639,13 @@ namespace rose::tools
 
     ExtractedPdfDocument PdfTextExtractor::extract(
         const ReadBinaryFileResult& file,
-        ocr::IOcrEngine& ocrEngine) const
+        ocr::IOcrEngine& ocrEngine,
+        const PdfPageSelection selection) const
     {
 #if !defined(ROSE_HAS_PDFIUM)
         (void)file;
         (void)ocrEngine;
+        (void)selection;
 
         throw std::runtime_error{
             "PDF analysis is unavailable in this Rose build because the optional "
@@ -694,13 +696,61 @@ namespace rose::tools
             };
         }
 
+        if (selection.startPage == 0u)
+        {
+            throw std::invalid_argument{
+                "PDF page selection requires a one-based start page."
+            };
+        }
+
+        if (selection.pageCount.has_value()
+            && *selection.pageCount == 0u)
+        {
+            throw std::invalid_argument{
+                "PDF page selection requires a positive page count."
+            };
+        }
+
+        const std::size_t totalPages =
+            static_cast<std::size_t>(pageCount);
+
+        if (selection.startPage > totalPages)
+        {
+            throw std::invalid_argument{
+                "Requested PDF start page "
+                + std::to_string(selection.startPage)
+                + " is beyond the document's "
+                + std::to_string(pageCount)
+                + " pages."
+            };
+        }
+
+        const std::size_t firstPageIndex =
+            selection.startPage - 1u;
+        const std::size_t availablePages =
+            totalPages - firstPageIndex;
+        const std::size_t selectedPages =
+            selection.pageCount.has_value()
+                ? (std::min)(*selection.pageCount, availablePages)
+                : availablePages;
+        const std::size_t endPageExclusive =
+            firstPageIndex + selectedPages;
+
         ExtractedPdfDocument result;
         result.pageCount = pageCount;
+        result.selectedPageStart =
+            static_cast<int>(firstPageIndex + 1u);
+        result.selectedPageEnd =
+            static_cast<int>(endPageExclusive);
+        result.selectedPageCount =
+            static_cast<int>(selectedPages);
 
-        for (int pageIndex = 0;
-             pageIndex < pageCount;
-             ++pageIndex)
+        for (std::size_t selectedPageIndex = firstPageIndex;
+             selectedPageIndex < endPageExclusive;
+             ++selectedPageIndex)
         {
+            const int pageIndex =
+                static_cast<int>(selectedPageIndex);
             if (result.truncated)
             {
                 break;
@@ -725,6 +775,8 @@ namespace rose::tools
             PagePtr page{
                 rawPage
             };
+
+            ++result.pagesExamined;
 
             const std::string embeddedText =
                 extractEmbeddedPageText(

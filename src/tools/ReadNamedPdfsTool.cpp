@@ -27,13 +27,30 @@ namespace rose::tools
                 || path.starts_with("\\\\");
         }
 
+        [[nodiscard]] bool namedPdfArgument(const std::string_view name)
+        {
+            if (name == "instruction") return true;
+
+            for (int i = 1; i <= 4; ++i)
+            {
+                const std::string prefix = "path" + std::to_string(i);
+                if (name == prefix
+                    || name == prefix + "_page_start"
+                    || name == prefix + "_page_count")
+                {
+                    return true;
+                }
+            }
+            return false;
+        }
+
+
         [[nodiscard]] std::vector<std::string> namedPaths(const ToolRequest& request)
         {
             for (const auto& [name, value] : request.arguments)
             {
                 (void)value;
-                if (name != "path1" && name != "path2" && name != "path3"
-                    && name != "path4" && name != "instruction")
+                if (!namedPdfArgument(name))
                     throw std::invalid_argument{ "read_named_pdfs rejects argument '" + name + "'." };
             }
 
@@ -65,7 +82,40 @@ namespace rose::tools
                 }
                 paths.push_back(path);
             }
+
+            for (int i = 1; i <= 4; ++i)
+            {
+                const std::string pathName = "path" + std::to_string(i);
+                const bool hasPath = request.arguments.contains(pathName);
+                const bool hasStart = request.arguments.contains(pathName + "_page_start");
+                const bool hasCount = request.arguments.contains(pathName + "_page_count");
+                if (!hasPath && (hasStart || hasCount))
+                {
+                    throw std::invalid_argument{
+                        "read_named_pdfs page-window arguments require their matching path."
+                    };
+                }
+            }
+
             return paths;
+        }
+
+
+        void forwardPageWindow(
+            const ToolRequest& batchRequest,
+            const int pathIndex,
+            ToolRequest& singleRead)
+        {
+            const std::string prefix = "path" + std::to_string(pathIndex);
+            const auto start =
+                batchRequest.arguments.find(prefix + "_page_start");
+            const auto count =
+                batchRequest.arguments.find(prefix + "_page_count");
+
+            if (start != batchRequest.arguments.end())
+                singleRead.arguments.emplace("page_start", start->second);
+            if (count != batchRequest.arguments.end())
+                singleRead.arguments.emplace("page_count", count->second);
         }
     }
 
@@ -74,7 +124,7 @@ namespace rose::tools
         , descriptor_{
             .id = "read_named_pdfs",
             .displayName = "Read Named PDFs",
-            .description = "Read two to four explicitly named PDFs as one bounded, confirmation-gated task. Uses the PDF text layer or OCR for each exact path. Reports extraction failures and coverage limits; never scans their parent directories.",
+            .description = "Read two to four explicitly named PDFs as one bounded, confirmation-gated task. Each exact file may optionally specify its own one-based page window. Uses the PDF text layer or OCR, reports extraction failures and coverage limits, and never scans parent directories.",
             .risk = ToolRisk::ReadOnly,
             .consent = ToolConsent::RequiresConfirmation,
             .parameters = {
@@ -82,6 +132,14 @@ namespace rose::tools
                 { .name = "path2", .description = "Second exact absolute PDF path.", .type = ToolValueType::String, .required = true },
                 { .name = "path3", .description = "Optional third exact PDF path.", .type = ToolValueType::String, .required = false },
                 { .name = "path4", .description = "Optional fourth exact PDF path.", .type = ToolValueType::String, .required = false },
+                { .name = "path1_page_start", .description = "Optional one-based start page for path1.", .type = ToolValueType::Integer, .required = false },
+                { .name = "path1_page_count", .description = "Optional positive page count for path1.", .type = ToolValueType::Integer, .required = false },
+                { .name = "path2_page_start", .description = "Optional one-based start page for path2.", .type = ToolValueType::Integer, .required = false },
+                { .name = "path2_page_count", .description = "Optional positive page count for path2.", .type = ToolValueType::Integer, .required = false },
+                { .name = "path3_page_start", .description = "Optional one-based start page for path3.", .type = ToolValueType::Integer, .required = false },
+                { .name = "path3_page_count", .description = "Optional positive page count for path3.", .type = ToolValueType::Integer, .required = false },
+                { .name = "path4_page_start", .description = "Optional one-based start page for path4.", .type = ToolValueType::Integer, .required = false },
+                { .name = "path4_page_count", .description = "Optional positive page count for path4.", .type = ToolValueType::Integer, .required = false },
                 { .name = "instruction", .description = "Question to guide per-document reading.", .type = ToolValueType::String, .required = false }
             }
         }
@@ -107,11 +165,16 @@ namespace rose::tools
         std::size_t completed = 0;
         constexpr std::size_t maximumEvidencePerFile{ 24u * 1024u };
         constexpr std::size_t maximumCombinedEvidence{ 20u * 1024u };
-        for (const std::string& path : paths)
+        for (std::size_t pathOffset = 0; pathOffset < paths.size(); ++pathOffset)
         {
+            const std::string& path = paths[pathOffset];
             try
             {
                 ToolRequest read{ .toolId = "read_pdf", .arguments = { { "path", path } } };
+                forwardPageWindow(
+                    request,
+                    static_cast<int>(pathOffset + 1u),
+                    read);
                 if (instruction != request.arguments.end())
                     read.arguments.emplace("instruction", instruction->second);
                 const ToolResult result = pdfReader_.execute(read);
@@ -181,9 +244,11 @@ namespace rose::tools
             .success = true,
             .message = "Read all " + std::to_string(completed)
                 + " named PDFs. Base conclusions only on the evidence below. "
-                  "If extractor_truncated, source_truncated, or result_window_truncated "
-                  "is true, explain that the full document was not covered. "
-                  "Do not infer legal outcomes or citations absent from the excerpts.\n"
+                  "Selected-page metadata is an intentional evidence boundary; do not "
+                  "claim unselected pages were reviewed. If extractor_truncated, "
+                  "source_truncated, or result_window_truncated is true, explain that "
+                  "even the requested page window was not fully covered. Do not infer "
+                  "legal outcomes or citations absent from the excerpts.\n"
                 + results.str(),
             .responseMode = ToolResponseMode::RequiresModelSynthesis,
             .artifacts = {}

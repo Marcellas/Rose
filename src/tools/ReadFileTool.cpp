@@ -108,6 +108,14 @@ namespace rose::tools
                 "ReadFileTool maximumBinaryBytes must be greater than zero."
             };
         }
+
+        if (config_.maximumBinarySafetyBytes == 0
+            || config_.maximumBinaryBytes > config_.maximumBinarySafetyBytes)
+        {
+            throw std::invalid_argument{
+                "ReadFileTool binary limits require a non-zero safety ceiling at least as large as the default binary limit."
+            };
+        }
     }
 
 
@@ -395,6 +403,22 @@ namespace rose::tools
     ReadBinaryFileResult ReadFileTool::readBinaryFile(
         const std::filesystem::path& path)
     {
+        return readBinaryFile(path, config_.maximumBinaryBytes);
+    }
+
+
+    ReadBinaryFileResult ReadFileTool::readBinaryFile(
+        const std::filesystem::path& path,
+        const std::size_t maximumBytes)
+    {
+        if (maximumBytes == 0u
+            || maximumBytes > config_.maximumBinarySafetyBytes)
+        {
+            throw std::invalid_argument{
+                "ReadFileTool requested binary limit exceeds the configured safety ceiling."
+            };
+        }
+
         // Binary parsing is still permission-gated by exactly the same one-shot
         // policy as text files.
         if (!permissions_.consumeReadOnce(path))
@@ -409,12 +433,11 @@ namespace rose::tools
 
         if (
             file.size
-            > static_cast<std::uintmax_t>(
-                config_.maximumBinaryBytes))
+            > static_cast<std::uintmax_t>(maximumBytes))
         {
             throw std::runtime_error{
                 "This attachment is too large for Rose's current binary-document limit ("
-                + std::to_string(config_.maximumBinaryBytes)
+                + std::to_string(maximumBytes)
                 + " bytes): "
                 + path.filename().string()
             };

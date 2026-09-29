@@ -5,6 +5,7 @@
 #include "tools/ToolRegistry.h"
 #include "tools/ToolTypes.h"
 
+#include <algorithm>
 #include <cctype>
 #include <charconv>
 #include <initializer_list>
@@ -1786,6 +1787,282 @@ namespace rose::agent
     }
 
 
+    namespace
+    {
+        struct PdfPageWindow
+        {
+            std::size_t startPage{ 1u };
+            std::size_t pageCount{ 0u };
+            std::size_t position{ 0u };
+        };
+
+
+        struct QuotedPdfReference
+        {
+            std::string path;
+            std::size_t quoteBegin{ 0u };
+            std::size_t quoteEnd{ 0u };
+        };
+
+
+        [[nodiscard]]
+        bool asciiWordAt(
+            const std::string_view lowerText,
+            const std::size_t position,
+            const std::string_view word) noexcept
+        {
+            if (position > lowerText.size()
+                || word.size() > lowerText.size() - position
+                || lowerText.substr(position, word.size()) != word)
+            {
+                return false;
+            }
+
+            const bool leftBoundary =
+                position == 0u
+                || !isAsciiWordCharacter(
+                    static_cast<unsigned char>(lowerText[position - 1u]));
+            const std::size_t end = position + word.size();
+            const bool rightBoundary =
+                end >= lowerText.size()
+                || !isAsciiWordCharacter(
+                    static_cast<unsigned char>(lowerText[end]));
+            return leftBoundary && rightBoundary;
+        }
+
+
+        void skipAsciiSpaces(
+            const std::string_view text,
+            std::size_t& position) noexcept
+        {
+            while (position < text.size()
+                   && std::isspace(
+                       static_cast<unsigned char>(text[position])) != 0)
+            {
+                ++position;
+            }
+        }
+
+
+        [[nodiscard]]
+        std::optional<std::size_t> positiveDecimalAt(
+            const std::string_view text,
+            std::size_t& position)
+        {
+            const std::size_t begin = position;
+            while (position < text.size()
+                   && std::isdigit(
+                       static_cast<unsigned char>(text[position])) != 0)
+            {
+                ++position;
+            }
+            if (begin == position) return std::nullopt;
+
+            std::size_t value{ 0u };
+            const auto [end, error] = std::from_chars(
+                text.data() + begin,
+                text.data() + position,
+                value);
+            if (error != std::errc{}
+                || end != text.data() + position
+                || value == 0u)
+            {
+                return std::nullopt;
+            }
+            return value;
+        }
+
+
+        [[nodiscard]]
+        std::vector<PdfPageWindow> explicitPdfPageWindows(
+            const std::string_view text)
+        {
+            const std::string lower = asciiLower(text);
+            std::vector<PdfPageWindow> windows;
+
+            // Natural language used in the UI: "first 25 pages".
+            for (std::size_t position = 0u; position < lower.size();)
+            {
+                position = lower.find("first", position);
+                if (position == std::string::npos) break;
+                if (!asciiWordAt(lower, position, "first"))
+                {
+                    ++position;
+                    continue;
+                }
+
+                std::size_t cursor = position + 5u;
+                skipAsciiSpaces(lower, cursor);
+                const auto count = positiveDecimalAt(lower, cursor);
+                if (!count.has_value())
+                {
+                    ++position;
+                    continue;
+                }
+                skipAsciiSpaces(lower, cursor);
+                if (asciiWordAt(lower, cursor, "page")
+                    || asciiWordAt(lower, cursor, "pages"))
+                {
+                    windows.push_back(PdfPageWindow{
+                        .startPage = 1u,
+                        .pageCount = *count,
+                        .position = position
+                    });
+                }
+                ++position;
+            }
+
+            // Also accept explicit ranges such as "pages 20-44",
+            // "pages 20 to 44", or "pages 20 through 44".
+            for (std::size_t position = 0u; position < lower.size();)
+            {
+                position = lower.find("pages", position);
+                if (position == std::string::npos) break;
+                if (!asciiWordAt(lower, position, "pages"))
+                {
+                    ++position;
+                    continue;
+                }
+
+                std::size_t cursor = position + 5u;
+                skipAsciiSpaces(lower, cursor);
+                const auto first = positiveDecimalAt(lower, cursor);
+                if (!first.has_value())
+                {
+                    ++position;
+                    continue;
+                }
+                skipAsciiSpaces(lower, cursor);
+
+                bool separator = false;
+                if (cursor < lower.size() && lower[cursor] == '-')
+                {
+                    ++cursor;
+                    separator = true;
+                }
+                else if (asciiWordAt(lower, cursor, "to"))
+                {
+                    cursor += 2u;
+                    separator = true;
+                }
+                else if (asciiWordAt(lower, cursor, "through"))
+                {
+                    cursor += 7u;
+                    separator = true;
+                }
+                if (!separator)
+                {
+                    ++position;
+                    continue;
+                }
+
+                skipAsciiSpaces(lower, cursor);
+                const auto last = positiveDecimalAt(lower, cursor);
+                if (!last.has_value() || *last < *first)
+                {
+                    ++position;
+                    continue;
+                }
+
+                windows.push_back(PdfPageWindow{
+                    .startPage = *first,
+                    .pageCount = *last - *first + 1u,
+                    .position = position
+                });
+                ++position;
+            }
+
+            return windows;
+        }
+
+
+        [[nodiscard]]
+        std::optional<PdfPageWindow> pageWindowForNamedPdf(
+            const std::string_view userText,
+            const std::vector<QuotedPdfReference>& references,
+            const std::size_t referenceIndex)
+        {
+            const QuotedPdfReference& current = references[referenceIndex];
+            const std::size_t beforeBegin = referenceIndex == 0u
+                ? 0u
+                : references[referenceIndex - 1u].quoteEnd + 1u;
+            std::string_view before = userText.substr(
+                beforeBegin,
+                current.quoteBegin - beforeBegin);
+
+            // Keep association local to the named file. A long legal-analysis
+            // instruction elsewhere in the prompt must not manufacture a page
+            // range for an unrelated PDF.
+            constexpr std::size_t maximumAssociationBytes{ 512u };
+            if (before.size() > maximumAssociationBytes)
+                before.remove_prefix(before.size() - maximumAssociationBytes);
+
+            const std::vector<PdfPageWindow> beforeWindows =
+                explicitPdfPageWindows(before);
+            if (!beforeWindows.empty())
+            {
+                // The closest preceding page phrase wins. This covers:
+                // Read the first 25 pages of this file: "C:\\...pdf".
+                return *std::max_element(
+                    beforeWindows.begin(),
+                    beforeWindows.end(),
+                    [](const PdfPageWindow& left, const PdfPageWindow& right)
+                    {
+                        return left.position < right.position;
+                    });
+            }
+
+            const std::size_t afterEnd =
+                referenceIndex + 1u < references.size()
+                    ? references[referenceIndex + 1u].quoteBegin
+                    : userText.size();
+            std::string_view after = userText.substr(
+                current.quoteEnd + 1u,
+                afterEnd - (current.quoteEnd + 1u));
+            if (after.size() > maximumAssociationBytes)
+                after = after.substr(0u, maximumAssociationBytes);
+
+            // Postfix syntax is supported only when the page phrase is the next
+            // meaningful clause after the path, e.g. "file.pdf", first 25 pages.
+            // This prevents a phrase introducing the NEXT PDF from leaking back
+            // onto the current one.
+            std::size_t prefix = 0u;
+            while (prefix < after.size())
+            {
+                const unsigned char c =
+                    static_cast<unsigned char>(after[prefix]);
+                if (std::isspace(c) != 0
+                    || after[prefix] == ','
+                    || after[prefix] == ';'
+                    || after[prefix] == ':'
+                    || after[prefix] == '-')
+                {
+                    ++prefix;
+                    continue;
+                }
+                break;
+            }
+            const std::string lowerAfter = asciiLower(after.substr(prefix));
+            if (!(lowerAfter.starts_with("first ")
+                  || lowerAfter.starts_with("pages ")))
+            {
+                return std::nullopt;
+            }
+
+            const std::vector<PdfPageWindow> afterWindows =
+                explicitPdfPageWindows(after.substr(prefix));
+            if (afterWindows.empty()) return std::nullopt;
+            return *std::min_element(
+                afterWindows.begin(),
+                afterWindows.end(),
+                [](const PdfPageWindow& left, const PdfPageWindow& right)
+                {
+                    return left.position < right.position;
+                });
+        }
+    } // namespace
+
+
     std::optional<tools::ToolRequest>
     CapabilityRoutingGuard::explicitNamedPdfRequest(
         const std::string_view userText,
@@ -1798,7 +2075,7 @@ namespace rose::agent
             return std::nullopt;
         }
 
-        std::vector<std::string> paths;
+        std::vector<QuotedPdfReference> references;
         for (std::size_t start = 0; start < userText.size(); ++start)
         {
             const char quote = userText[start];
@@ -1819,33 +2096,64 @@ namespace rose::agent
                 const std::string path = decodeCommonPathEscapes(candidate);
                 const std::string normalized = asciiLower(path);
                 bool duplicate = false;
-                for (const std::string& previous : paths)
+                for (const QuotedPdfReference& previous : references)
                 {
-                    if (asciiLower(previous) == normalized) duplicate = true;
+                    if (asciiLower(previous.path) == normalized) duplicate = true;
                 }
-                if (!duplicate) paths.push_back(path);
+                if (!duplicate)
+                {
+                    references.push_back(QuotedPdfReference{
+                        .path = path,
+                        .quoteBegin = start,
+                        .quoteEnd = end
+                    });
+                }
                 start = end;
             }
         }
 
-        if (paths.size() == 1 && toolRegistered(toolRegistry, "read_pdf"))
+        if (references.size() == 1u && toolRegistered(toolRegistry, "read_pdf"))
         {
-            return tools::ToolRequest{
+            tools::ToolRequest request{
                 .toolId = "read_pdf",
-                .arguments = { { "path", paths.front() },
-                    { "instruction", std::string{ userText } } }
+                .arguments = {
+                    { "path", references.front().path },
+                    { "instruction", std::string{ userText } }
+                }
             };
+            if (const auto window =
+                    pageWindowForNamedPdf(userText, references, 0u))
+            {
+                request.arguments.emplace(
+                    "page_start",
+                    std::to_string(window->startPage));
+                request.arguments.emplace(
+                    "page_count",
+                    std::to_string(window->pageCount));
+            }
+            return request;
         }
-        if (paths.size() < 2 || paths.size() > 4
+        if (references.size() < 2u || references.size() > 4u
             || !toolRegistered(toolRegistry, "read_named_pdfs"))
         {
             return std::nullopt;
         }
 
         tools::ToolRequest request{ .toolId = "read_named_pdfs", .arguments = {} };
-        for (std::size_t i = 0; i < paths.size(); ++i)
+        for (std::size_t i = 0; i < references.size(); ++i)
         {
-            request.arguments.emplace("path" + std::to_string(i + 1), paths[i]);
+            const std::string prefix = "path" + std::to_string(i + 1u);
+            request.arguments.emplace(prefix, references[i].path);
+            if (const auto window =
+                    pageWindowForNamedPdf(userText, references, i))
+            {
+                request.arguments.emplace(
+                    prefix + "_page_start",
+                    std::to_string(window->startPage));
+                request.arguments.emplace(
+                    prefix + "_page_count",
+                    std::to_string(window->pageCount));
+            }
         }
         request.arguments.emplace("instruction", std::string{ userText });
         return request;

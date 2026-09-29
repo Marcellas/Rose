@@ -234,6 +234,59 @@ int main()
             }
         }
 
+        // Binary reads retain a conservative ordinary default while reviewed
+        // container readers can opt into a larger per-call allowance that is
+        // still capped by the hard safety ceiling. Keep this test tiny; the same
+        // policy scales to Rose's 512 MiB PDF ceiling without allocating a huge
+        // fixture during CI.
+        const std::filesystem::path binaryFixture =
+            root / "bounded-binary.bin";
+        {
+            std::ofstream stream{ binaryFixture, std::ios::binary };
+            stream << "0123456789abcdefghijklmnopqrstuv";
+        }
+        rose::permissions::PermissionSystem binaryPermissions;
+        rose::tools::ReadFileTool boundedBinaryReader{
+            binaryPermissions,
+            rose::tools::ReadFileConfig{
+                .maximumTextBytes = 64u * 1024u,
+                .maximumTextRangeScanBytes = 4u * 1024u * 1024u,
+                .maximumBinaryBytes = 16u,
+                .maximumBinarySafetyBytes = 64u
+            }
+        };
+
+        binaryPermissions.grantReadOnce(binaryFixture);
+        bool defaultBinaryLimitRejected = false;
+        try
+        {
+            (void)boundedBinaryReader.readBinaryFile(binaryFixture);
+        }
+        catch (const std::runtime_error&)
+        {
+            defaultBinaryLimitRejected = true;
+        }
+        require(defaultBinaryLimitRejected,
+            "ordinary binary read should keep its conservative default limit");
+
+        binaryPermissions.grantReadOnce(binaryFixture);
+        const auto widenedBinary =
+            boundedBinaryReader.readBinaryFile(binaryFixture, 64u);
+        require(widenedBinary.bytes.size() == 32u,
+            "reviewed binary read did not honor its bounded per-call allowance");
+
+        bool binarySafetyCeilingRejected = false;
+        try
+        {
+            (void)boundedBinaryReader.readBinaryFile(binaryFixture, 65u);
+        }
+        catch (const std::invalid_argument&)
+        {
+            binarySafetyCeilingRejected = true;
+        }
+        require(binarySafetyCeilingRejected,
+            "binary per-call override exceeded the configured safety ceiling");
+
         rose::permissions::PermissionSystem readPermissions;
         rose::tools::ReadFileTool readFileTool{
             readPermissions,

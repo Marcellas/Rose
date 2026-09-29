@@ -20,6 +20,11 @@ namespace rose::tools
 
     namespace
     {
+        constexpr std::size_t maximumPdfBinaryBytes{
+            512u * 1024u * 1024u
+        };
+
+
         void appendAttachmentHeader(
             std::string& context,
             const std::size_t index,
@@ -143,7 +148,8 @@ namespace rose::tools
             {
                 const ReadBinaryFileResult binaryFile =
                     readFileTool_.readBinaryFile(
-                        attachment.path);
+                        attachment.path,
+                        maximumPdfBinaryBytes);
 
                 const ExtractedPdfDocument pdf =
                     pdfTextExtractor_.extract(

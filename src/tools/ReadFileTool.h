@@ -26,9 +26,15 @@ namespace rose::tools
         // source file can still be inspected without loading arbitrarily large files.
         std::size_t maximumTextRangeScanBytes{ 4u * 1024u * 1024u };
 
-        // Binary containers such as PDFs need their complete byte stream in order
-        // to parse reliably. Reject oversized files instead of truncating them.
+        // Ordinary binary readers keep the historical 64 MiB default. Tools that
+        // have reviewed semantics for larger containers may request a larger
+        // per-call limit, but never above maximumBinarySafetyBytes.
         std::size_t maximumBinaryBytes{ 64u * 1024u * 1024u };
+
+        // Hard ceiling for any one binary read. 512 MiB is a safety limit, not a
+        // permanently reserved buffer: ReadFileTool allocates only the exact
+        // accepted file size for the duration of that read.
+        std::size_t maximumBinarySafetyBytes{ 512u * 1024u * 1024u };
     };
 
 
@@ -94,6 +100,13 @@ namespace rose::tools
         [[nodiscard]]
         ReadBinaryFileResult readBinaryFile(
             const std::filesystem::path& path);
+
+        // Reviewed readers such as PDF may opt into a larger per-call limit. The
+        // requested limit must remain within maximumBinarySafetyBytes.
+        [[nodiscard]]
+        ReadBinaryFileResult readBinaryFile(
+            const std::filesystem::path& path,
+            std::size_t maximumBytes);
 
     private:
         [[nodiscard]]

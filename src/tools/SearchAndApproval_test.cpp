@@ -26,6 +26,7 @@ namespace
     {
     public:
         std::vector<std::string> readPaths;
+        std::vector<rose::tools::ToolRequest> readRequests;
         std::string failingPath;
         std::string partialPath;
         rose::tools::ToolDescriptor descriptor_{
@@ -43,6 +44,7 @@ namespace
         {
             const std::string path = request.arguments.at("path");
             readPaths.push_back(path);
+            readRequests.push_back(request);
             if (path == failingPath) throw std::runtime_error{ "OCR unavailable" };
             return { .success = true, .message = "Read PDF: " + path
                 + (path == partialPath ? "\nextractor_truncated=true"
@@ -167,6 +169,48 @@ int main()
         namedPdfPrompt, documentRegistry, {});
     check(recovered && recovered->toolId == "read_named_pdfs",
         "multi-PDF recovery must not analyze a parent directory");
+
+    // A page-window instruction immediately before one named PDF must become
+    // structured tool arguments for that file only. This reproduces the legal
+    // review request that asked Rose to read two complete PDFs plus only the
+    // first 25 pages of a much larger third PDF.
+    const std::string rangedPdfPrompt =
+        "Read and analyze these PDFs in entirety: \"C:\\Legal\\Decision.pdf\"\n"
+        "\"C:\\Legal\\AO.pdf\"\n"
+        "Read the first 25 pages of this file and assume quoted evidence is present: \"C:\\Legal\\Application.pdf\"";
+    const auto ranged = rose::agent::CapabilityRoutingGuard::explicitNamedPdfRequest(
+        rangedPdfPrompt, documentRegistry);
+    check(ranged && ranged->toolId == "read_named_pdfs"
+        && ranged->arguments.at("path3_page_start") == "1"
+        && ranged->arguments.at("path3_page_count") == "25"
+        && !ranged->arguments.contains("path1_page_count")
+        && !ranged->arguments.contains("path2_page_count"),
+        "per-file PDF page-window routing did not preserve first-25-page intent");
+
+    fake.readRequests.clear();
+    const auto rangedBatch = documentRegistry.execute(*ranged);
+    check(rangedBatch.success && fake.readRequests.size() == 3
+        && fake.readRequests[2].arguments.at("page_start") == "1"
+        && fake.readRequests[2].arguments.at("page_count") == "25"
+        && !fake.readRequests[0].arguments.contains("page_count")
+        && !fake.readRequests[1].arguments.contains("page_count"),
+        "read_named_pdfs did not forward the page window to only the selected PDF");
+
+    const auto singleRanged = rose::agent::CapabilityRoutingGuard::explicitNamedPdfRequest(
+        R"(Review the first 25 pages of "C:\Legal\Large Application.pdf".)",
+        documentRegistry);
+    check(singleRanged && singleRanged->toolId == "read_pdf"
+        && singleRanged->arguments.at("page_start") == "1"
+        && singleRanged->arguments.at("page_count") == "25",
+        "single named PDF first-N-page intent did not become a bounded read window");
+
+    const auto explicitRange = rose::agent::CapabilityRoutingGuard::explicitNamedPdfRequest(
+        R"(Review "C:\Legal\Large Application.pdf", pages 20-44.)",
+        documentRegistry);
+    check(explicitRange && explicitRange->toolId == "read_pdf"
+        && explicitRange->arguments.at("page_start") == "20"
+        && explicitRange->arguments.at("page_count") == "25",
+        "single named PDF explicit page range did not become a bounded read window");
 
     rose::tools::ToolRequest confirmedScan{
         .toolId = "scan_directory_tree",

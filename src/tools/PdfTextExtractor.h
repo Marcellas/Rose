@@ -3,6 +3,7 @@
 #include "tools/ReadFileTool.h"
 
 #include <cstddef>
+#include <optional>
 #include <string>
 
 namespace rose::ocr
@@ -34,10 +35,31 @@ namespace rose::tools
     };
 
 
+
+    struct PdfPageSelection
+    {
+        // One-based page index. Defaults to the beginning of the document.
+        std::size_t startPage{ 1u };
+
+        // When absent, extraction continues through the end of the document.
+        // When present, only this many pages are selected (or the remaining
+        // document pages when the request extends beyond the end).
+        std::optional<std::size_t> pageCount{};
+    };
+
+
     struct ExtractedPdfDocument
     {
         std::string text;
+        // Total pages in the source PDF, independent of a requested window.
         int pageCount{ 0 };
+
+        // One-based page window actually selected from the source document.
+        int selectedPageStart{ 0 };
+        int selectedPageEnd{ 0 };
+        int selectedPageCount{ 0 };
+        int pagesExamined{ 0 };
+
         int pagesWithText{ 0 };
         int pagesWithEmbeddedText{ 0 };
         int pagesOcred{ 0 };
@@ -73,7 +95,8 @@ namespace rose::tools
         [[nodiscard]]
         ExtractedPdfDocument extract(
             const ReadBinaryFileResult& file,
-            ocr::IOcrEngine& ocrEngine) const;
+            ocr::IOcrEngine& ocrEngine,
+            PdfPageSelection selection = {}) const;
 
     private:
         PdfTextExtractorConfig config_;

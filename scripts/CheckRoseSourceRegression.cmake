@@ -1891,3 +1891,50 @@ rose_require_source_text(
     "failed validation diagnostics are not masked by redundant root-list recovery")
 
 message(STATUS "Rose Batch 55 project validation continuation regression contract: PASS")
+
+
+# Batch 56. Large exact PDFs may be accepted up to a 512 MiB safety ceiling,
+# while explicit first-N/range requests stay page-bounded before extraction.
+# Multi-PDF legal/document review preserves a separate page window per named
+# file rather than trying to load and analyze every page of a huge attachment.
+rose_require_source_text(
+    "src/tools/ReadFileTool.h"
+    "maximumBinarySafetyBytes{ 512u * 1024u * 1024u }"
+    "binary-document safety ceiling accepts the known 281 MiB PDF without becoming unbounded")
+
+rose_require_source_text(
+    "src/tools/ReadPdfRegisteredTool.cpp"
+    "maximumPdfBinaryBytes"
+    "PDF reading opts into the reviewed 512 MiB allowance without widening every binary reader")
+
+rose_require_source_text(
+    "src/tools/ReadPdfRegisteredTool.cpp"
+    ".name = \"page_count\""
+    "single-PDF reading exposes an explicit bounded page window")
+
+rose_require_source_text(
+    "src/tools/ReadPdfRegisteredTool.cpp"
+    "not remain resident during later model synthesis"
+    "large PDF backing bytes are released before model synthesis")
+
+rose_require_source_text(
+    "src/tools/PdfTextExtractor.cpp"
+    "firstPageIndex ="
+    "PDF extraction starts at the requested one-based page window")
+
+rose_require_source_text(
+    "src/agent/CapabilityRoutingGuard.cpp"
+    "Read the first 25 pages of this file"
+    "natural-language first-N-page intent is associated with the named PDF")
+
+rose_require_source_text(
+    "src/tools/SearchAndApproval_test.cpp"
+    "per-file PDF page-window routing did not preserve first-25-page intent"
+    "multi-PDF page-window routing is regression-tested")
+
+rose_require_source_text(
+    "src/tools/FilesystemTools_test.cpp"
+    "binary per-call override exceeded the configured safety ceiling"
+    "large-container binary allowance remains capped and tool-specific")
+
+message(STATUS "Rose Batch 56 large-PDF page-window regression contract: PASS")
