@@ -504,6 +504,7 @@ namespace rose::tools
         result.message =
             "Created a new text file: "
             + destination.string();
+        result.responseMode = ToolResponseMode::AuthoritativeCompletion;
 
         result.artifacts.push_back(
             artifacts::Artifact{

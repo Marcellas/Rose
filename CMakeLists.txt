@@ -14,6 +14,7 @@ add_executable(RoseSearchAndApprovalTest
     src/tools/SearchAndApproval_test.cpp
     src/tools/SearchLocalFilesTool.cpp
     src/tools/ReadNamedPdfsTool.cpp
+    src/documents/ContextSafeDocumentSynthesizer.cpp
     src/tools/ToolRegistry.cpp
     src/agent/CapabilityRoutingGuard.cpp
     src/files/FileFormatCatalog.cpp
@@ -22,6 +23,24 @@ add_executable(RoseSearchAndApprovalTest
 target_include_directories(RoseSearchAndApprovalTest PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
 target_compile_features(RoseSearchAndApprovalTest PRIVATE cxx_std_20)
 add_test(NAME RoseSearchAndApprovalTest COMMAND RoseSearchAndApprovalTest)
+
+add_executable(RoseOnlineSearchTest
+    src/tools/SearchOnlineTool_test.cpp
+    src/tools/SearchOnlineTool.cpp
+    src/integrations/SimpleJson.cpp)
+target_include_directories(RoseOnlineSearchTest PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
+target_compile_features(RoseOnlineSearchTest PRIVATE cxx_std_20)
+add_test(NAME RoseOnlineSearchTest COMMAND RoseOnlineSearchTest)
+
+add_executable(RoseCoreContinuationTest
+    src/core/RoseCore_test.cpp
+    src/core/RoseCore.cpp
+    src/documents/ContextSafeDocumentSynthesizer.cpp
+    src/conversation/Conversation.cpp
+    src/logging/Logger.cpp
+    src/policy/ContentPolicy.cpp)
+target_include_directories(RoseCoreContinuationTest PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
+target_compile_features(RoseCoreContinuationTest PRIVATE cxx_std_20)
 
 
 # =============================================================================
@@ -945,6 +964,8 @@ add_executable(
     src/tools/ScanDirectoryTreeTool.cpp
     src/tools/SearchLocalFilesTool.h
     src/tools/SearchLocalFilesTool.cpp
+    src/tools/SearchOnlineTool.h
+    src/tools/SearchOnlineTool.cpp
     src/tools/ListZipArchiveTool.h
     src/tools/ListZipArchiveTool.cpp
     src/tools/ExtractZipArchiveTool.h
@@ -1421,6 +1442,8 @@ add_executable(
     src/memory/IMemoryObserver.h
     src/memory/ConversationMemoryCandidateTracker.h
     src/memory/ConversationMemoryCandidateTracker.cpp
+    src/tools/RememberMemoryTool.h
+    src/tools/RememberMemoryTool.cpp
     src/memory/MemorySystem_test.cpp
 )
 
@@ -1470,6 +1493,17 @@ rose_enable_warnings(RoseWorkspaceSystemTest)
 # =============================================================================
 # Desktop workspace bridge unit test
 # =============================================================================
+
+add_executable(
+    RoseResponseParserTest
+    src/ui/ResponseDocument.h
+    src/ui/ResponseParser.h
+    src/ui/ResponseParser.cpp
+    src/ui/ResponseParser_test.cpp
+)
+target_include_directories(RoseResponseParserTest PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
+rose_configure_cpp20(RoseResponseParserTest)
+rose_enable_warnings(RoseResponseParserTest)
 
 add_executable(
     RoseChatBridgeWorkspaceTest
@@ -2142,8 +2176,10 @@ set(
     RoseImageGenerationProfileTest
     RoseLocalImageModelPresetTest
     RoseMemorySystemTest
+    RoseCoreContinuationTest
     RoseWorkspaceSystemTest
     RoseChatBridgeWorkspaceTest
+    RoseResponseParserTest
     RoseBackgroundJobsTest
     RoseProjectKnowledgeTest
     RoseIntegrationSystemTest
@@ -2224,10 +2260,16 @@ add_custom_target(
         $<TARGET_FILE:RoseMemorySystemTest>
 
     COMMAND
+        $<TARGET_FILE:RoseCoreContinuationTest>
+
+    COMMAND
         $<TARGET_FILE:RoseWorkspaceSystemTest>
 
     COMMAND
         $<TARGET_FILE:RoseChatBridgeWorkspaceTest>
+
+    COMMAND
+        $<TARGET_FILE:RoseResponseParserTest>
 
     COMMAND
         $<TARGET_FILE:RoseBackgroundJobsTest>
@@ -2288,8 +2330,10 @@ add_custom_target(
         RoseImageGenerationProfileTest
         RoseLocalImageModelPresetTest
         RoseMemorySystemTest
+        RoseCoreContinuationTest
         RoseWorkspaceSystemTest
         RoseChatBridgeWorkspaceTest
+        RoseResponseParserTest
         RoseBackgroundJobsTest
         RoseProjectKnowledgeTest
         RoseIntegrationSystemTest

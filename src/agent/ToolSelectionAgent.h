@@ -59,7 +59,8 @@ namespace rose::agent
         [[nodiscard]]
         AgentDecision recoverTextCreationDecision(
             std::string_view userText,
-            std::string_view priorUserTaskContext) const;
+            std::string_view priorUserTaskContext,
+            std::string_view requiredPath = {}) const;
 
         [[nodiscard]]
         AgentDecision parseDecision(

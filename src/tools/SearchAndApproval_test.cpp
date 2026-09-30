@@ -5,6 +5,7 @@
 #include "tools/SearchLocalFilesTool.h"
 #include "tools/ReadNamedPdfsTool.h"
 #include "tools/ToolRegistry.h"
+#include "model/IModelProvider.h"
 #include "ui/TextPresentation.h"
 
 #include <chrono>
@@ -29,6 +30,7 @@ namespace
         std::vector<rose::tools::ToolRequest> readRequests;
         std::string failingPath;
         std::string partialPath;
+        bool longResult{ false };
         rose::tools::ToolDescriptor descriptor_{
             .id = "read_pdf", .displayName = "Read PDF", .description = "Test reader",
             .risk = rose::tools::ToolRisk::ReadOnly,
@@ -49,10 +51,33 @@ namespace
             return { .success = true, .message = "Read PDF: " + path
                 + (path == partialPath ? "\nextractor_truncated=true"
                     : "\nextractor_truncated=false")
-                + "\ncoverage=full_extracted_content", .trustedMetadata = {},
+                + "\ncoverage=full_extracted_content"
+                + (longResult ? "\n<rose_untrusted_pdf_content>\n"
+                    + std::string(2600, 'x')
+                    + "\n</rose_untrusted_pdf_content>" : ""), .trustedMetadata = {},
                 .sourceWindowEvidence = std::nullopt,
                 .responseMode = rose::tools::ToolResponseMode::RequiresModelSynthesis,
                 .artifacts = {} };
+        }
+    };
+
+    class BatchSummaryProvider final : public rose::model::IModelProvider
+    {
+    public:
+        int calls{ 0 };
+        bool fail{ false };
+        rose::model::ModelContextUsage inspectContext(
+            const rose::model::ModelRequest& request) const override
+        {
+            return { 1000, 16384, request.maxGeneratedTokens };
+        }
+        rose::model::ModelResponse generate(
+            const rose::model::ModelRequest&) override
+        {
+            ++calls;
+            if (fail) throw std::runtime_error{ "model reducer unavailable" };
+            return { "Condensed cross-file evidence with source names.", {}, 12,
+                rose::model::ModelFinishReason::EndOfGeneration };
         }
     };
 }
@@ -150,18 +175,75 @@ int main()
     check(batch.success && fake.readPaths.size() == 3
         && batch.message.find("Read all 3 named PDFs") != std::string::npos,
         "named PDF batch failed to read all exact files");
+    check(fake.readRequests.size() == 3
+        && fake.readRequests[0].arguments.at("instruction").size() < 300
+        && fake.readRequests[0].arguments.at("instruction").find("C:\\Legal")
+            == std::string::npos,
+        "named PDF batch repeated the full user request into each PDF read");
+    auto missingExtension = *named;
+    missingExtension.arguments["instruction"] +=
+        R"( and "C:\Legal\DoDI Referral".)";
+    const auto omitted = documentRegistry.execute(missingExtension);
+    check(!omitted.success && omitted.message.find("DoDI Referral: omitted")
+        != std::string::npos,
+        "a quoted PDF path without its extension must not disappear silently");
+    fake.readPaths.clear();
+    const auto sixNamed = rose::agent::CapabilityRoutingGuard::explicitNamedPdfRequest(
+        R"(Analyze all six PDFs: "C:\Legal\A.pdf", "C:\Legal\B.pdf", "C:\Legal\C.pdf", "C:\Legal\D.pdf", "C:\Legal\E.pdf", and "C:\Legal\F.pdf".)",
+        documentRegistry);
+    check(sixNamed && sixNamed->toolId == "read_named_pdfs"
+        && sixNamed->arguments.at("path6") == R"(C:\Legal\F.pdf)",
+        "six exact PDFs must route as one named batch");
+    const auto sixResult = documentRegistry.execute(*sixNamed);
+    check(sixResult.success && fake.readPaths.size() == 6
+        && sixResult.message.find("Read all 6 named PDFs") != std::string::npos,
+        "six-file batch must read each requested PDF");
+    BatchSummaryProvider batchProvider;
+    rose::tools::ReadNamedPdfsTool largeBatch{ fake, &batchProvider };
+    rose::tools::ToolRequest many{ .toolId = "read_named_pdfs" };
+    std::string manyPrompt = "Review these PDFs: ";
+    for (int i = 1; i <= 12; ++i)
+    {
+        const std::string path = "C:\\Legal\\File" + std::to_string(i) + ".pdf";
+        many.arguments.emplace("path" + std::to_string(i), path);
+        manyPrompt += "\"" + path + "\" ";
+    }
+    check(largeBatch.descriptor().parameters.size() >= 72,
+        "large batch must advertise all exact path and page arguments");
+    const auto routedMany = rose::agent::CapabilityRoutingGuard::explicitNamedPdfRequest(
+        manyPrompt, documentRegistry);
+    check(routedMany && routedMany->arguments.at("path12") == many.arguments.at("path12"),
+        "large named PDF request lost an exact path");
+    fake.longResult = true;
+    const auto manyResult = largeBatch.execute(many);
+    check(manyResult.success && batchProvider.calls > 0
+        && manyResult.message.find("Condensed cross-file evidence") != std::string::npos
+        && manyResult.message.find("File12.pdf") != std::string::npos,
+        "large named PDF batch must retain coverage and reduce evidence");
+    batchProvider.fail = true;
+    const auto reducerFailure = largeBatch.execute(many);
+    check(!reducerFailure.success
+        && reducerFailure.responseMode == rose::tools::ToolResponseMode::RequiresModelSynthesis
+        && reducerFailure.message.find("model reducer unavailable") != std::string::npos
+        && reducerFailure.message.find("File12.pdf") != std::string::npos
+        && reducerFailure.message.find("Preview only") != std::string::npos,
+        "reducer failure must preserve scoped previews of completed reads");
+    batchProvider.fail = false;
+    fake.longResult = false;
+    fake.readPaths.clear();
     fake.failingPath = R"(C:\Legal\Navy BCNR\APPLICATION.pdf)";
     const auto incomplete = documentRegistry.execute(*named);
     check(!incomplete.success
-        && incomplete.responseMode == rose::tools::ToolResponseMode::AuthoritativeCompletion
+        && incomplete.responseMode == rose::tools::ToolResponseMode::RequiresModelSynthesis
         && incomplete.message.find("OCR unavailable") != std::string::npos
-        && incomplete.message.find("No conclusion") != std::string::npos,
-        "failed named PDF read must stop cross-document analysis");
+        && incomplete.message.find("partial review") != std::string::npos
+        && incomplete.message.find("C:\\Legal\\AO (26 pgs).pdf") != std::string::npos,
+        "failed named PDF read must retain the successfully read evidence");
     fake.failingPath.clear();
     fake.partialPath = R"(C:\Legal\Navy BCNR\APPLICATION.pdf)";
     const auto bounded = documentRegistry.execute(*named);
     check(!bounded.success
-        && bounded.responseMode == rose::tools::ToolResponseMode::AuthoritativeCompletion
+        && bounded.responseMode == rose::tools::ToolResponseMode::RequiresModelSynthesis
         && bounded.message.find("complete review is unavailable")
             != std::string::npos,
         "bounded OCR result must not become a full legal analysis");

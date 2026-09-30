@@ -4,6 +4,7 @@
 
 #include <filesystem>
 #include <memory>
+#include <optional>
 #include <string>
 #include <string_view>
 
@@ -47,13 +48,30 @@ namespace rose::ui
         void appendError(
             std::string_view text);
 
+        void appendPlainMessage(
+            std::string_view label,
+            std::string_view text);
+
         void clear();
 
         [[nodiscard]]
         std::string copyableText() const;
 
+        // The message under a formatted-view context menu, in its original
+        // copyable form. Precise substring selection lives in the text view.
+        [[nodiscard]]
+        std::optional<std::string> messageAt(
+            float x,
+            float y) const;
+
         void scrollBy(
             float deltaPixels);
+
+        [[nodiscard]] float scrollFraction() const noexcept;
+        void setScrollFraction(float fraction);
+
+        [[nodiscard]] bool beginScrollbarDrag(float x, float y);
+        void dragScrollbar(float y);
 
         // Returns true when the click was consumed by an artifact card.
         // Left-click opens the artifact. Right-click opens its containing folder.

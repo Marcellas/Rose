@@ -1,6 +1,7 @@
 #include "ui/RichResponseRenderer.h"
 
 #include "ui/MathRenderer.h"
+#include "ui/TextPresentation.h"
 
 #include <SDL3/SDL.h>
 #include <SDL3_ttf/SDL_ttf.h>
@@ -9,12 +10,20 @@
 #include <cctype>
 #include <cstddef>
 #include <filesystem>
+#include <iostream>
 #include <memory>
 #include <stdexcept>
 #include <string>
 #include <string_view>
 #include <utility>
 #include <vector>
+
+#ifdef _WIN32
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <Windows.h>
+#endif
 
 namespace rose::ui
 {
@@ -276,6 +285,8 @@ namespace rose::ui
         SDL_Renderer& renderer_;
         TTF_TextEngine& textEngine_;
 
+        // SDL_ttf borrows fallback fonts; destroy these after the faces below.
+        std::vector<FontPtr> symbolFallbackFonts_;
         FontPtr regularFont_;
         FontPtr boldFont_;
         FontPtr italicFont_;
@@ -286,7 +297,7 @@ namespace rose::ui
         FontPtr heading2Font_;
         FontPtr heading3Font_;
 
-        MathRenderer mathRenderer_;
+        std::unique_ptr<MathRenderer> mathRenderer_;
 
 
         static constexpr SDL_Color bodyColor{
@@ -339,10 +350,6 @@ namespace rose::ui
             std::filesystem::path microTexResourceRoot)
             : renderer_{ renderer }
             , textEngine_{ textEngine }
-            , mathRenderer_{
-                renderer,
-                std::move(microTexResourceRoot)
-            }
         {
             const std::filesystem::path absoluteFontPath =
                 std::filesystem::absolute(
@@ -410,6 +417,59 @@ namespace rose::ui
                     absoluteFontPath,
                     21.0f,
                     TTF_STYLE_BOLD);
+
+#ifdef _WIN32
+            wchar_t windowsDirectory[MAX_PATH]{};
+            const UINT directoryLength =
+                GetWindowsDirectoryW(windowsDirectory, MAX_PATH);
+            if (directoryLength > 0 && directoryLength < MAX_PATH)
+            {
+                const std::filesystem::path symbolPath =
+                    std::filesystem::path{ windowsDirectory }
+                    / "Fonts" / "seguisym.ttf";
+                if (std::filesystem::exists(symbolPath))
+                {
+                    const auto addFallback = [&](TTF_Font* face,
+                                                 const float size)
+                    {
+                        FontPtr symbolFont = openStyledFont(
+                            symbolPath, size, TTF_STYLE_NORMAL);
+                        if (TTF_AddFallbackFont(face, symbolFont.get()))
+                        {
+                            symbolFallbackFonts_.push_back(
+                                std::move(symbolFont));
+                        }
+                    };
+
+                    addFallback(regularFont_.get(), 18.0f);
+                    addFallback(boldFont_.get(), 18.0f);
+                    addFallback(italicFont_.get(), 18.0f);
+                    addFallback(boldItalicFont_.get(), 18.0f);
+                    addFallback(codeFont_.get(), 17.0f);
+                    addFallback(heading1Font_.get(), 28.0f);
+                    addFallback(heading2Font_.get(), 24.0f);
+                    addFallback(heading3Font_.get(), 21.0f);
+                }
+            }
+#endif
+
+            // The response layout remains usable if optional MicroTeX resources
+            // are absent from a packaged build. Math blocks then show their
+            // source text through the existing per-formula fallback below.
+            if (!microTexResourceRoot.empty()
+                && std::filesystem::exists(microTexResourceRoot))
+            {
+                try
+                {
+                    mathRenderer_ = std::make_unique<MathRenderer>(
+                        renderer_, std::move(microTexResourceRoot));
+                }
+                catch (const std::exception& exception)
+                {
+                    std::cerr << "Rose math renderer unavailable: "
+                        << exception.what() << '\n';
+                }
+            }
         }
 
 
@@ -903,10 +963,12 @@ namespace rose::ui
                     try
                     {
                         MathTexture math =
-                            mathRenderer_.renderInlineMath(
+                            mathRenderer_
+                                ? mathRenderer_->renderInlineMath(
                                 span.text,
                                 width,
-                                18.0f);
+                                18.0f)
+                                : MathTexture{};
 
                         if (math)
                         {
@@ -939,9 +1001,8 @@ namespace rose::ui
                     }
 
                     const std::string fallback =
-                        std::string{ "$" }
-                        + span.text
-                        + "$";
+                        makeReadableChatText(
+                            std::string{ "$" } + span.text + "$");
 
                     addTextPiece(
                         regularFont_.get(),
@@ -1146,6 +1207,81 @@ namespace rose::ui
         }
 
 
+        void layoutTable(
+            RichResponseLayout::Impl& layout,
+            const ResponseBlock& block,
+            const int width,
+            float& y) const
+        {
+            if (block.tableRows.empty()) return;
+            const std::size_t columns = block.tableRows.front().size();
+            if (columns == 0) return;
+
+            constexpr int padding{ 8 };
+            const float columnWidth =
+                static_cast<float>(width) / static_cast<float>(columns);
+            y += 7.0f;
+            for (std::size_t row = 0; row < block.tableRows.size(); ++row)
+            {
+                const float rowTop = y;
+                RichResponseLayout::Impl::Command background;
+                background.kind = RichResponseLayout::Impl::CommandKind::Rectangle;
+                background.color = row == 0
+                    ? SDL_Color{ 58, 53, 70, 255 }
+                    : row % 2 == 0
+                        ? SDL_Color{ 38, 36, 46, 255 }
+                        : SDL_Color{ 32, 30, 40, 255 };
+                background.rect = SDL_FRect{
+                    0.0f, rowTop, static_cast<float>(width), 1.0f
+                };
+                const std::size_t backgroundIndex = layout.commands.size();
+                layout.commands.push_back(std::move(background));
+
+                int contentHeight{ 0 };
+                for (std::size_t column = 0; column < columns; ++column)
+                {
+                    const std::string readable = makeReadableChatText(
+                        block.tableRows[row][column]);
+                    int textWidth{ 0 };
+                    int textHeight{ 0 };
+                    TextPtr cellText = createWrappedText(
+                        row == 0 ? boldFont_.get() : regularFont_.get(),
+                        readable,
+                        std::max(1, static_cast<int>(columnWidth) - 2 * padding),
+                        bodyColor,
+                        textWidth,
+                        textHeight);
+                    RichResponseLayout::Impl::Command cell;
+                    cell.kind = RichResponseLayout::Impl::CommandKind::Text;
+                    cell.rect = SDL_FRect{
+                        columnWidth * static_cast<float>(column) + padding,
+                        rowTop + padding,
+                        static_cast<float>(textWidth),
+                        static_cast<float>(textHeight)
+                    };
+                    cell.color = bodyColor;
+                    cell.text = std::move(cellText);
+                    layout.commands.push_back(std::move(cell));
+                    contentHeight = std::max(contentHeight, textHeight);
+                }
+
+                const float rowHeight = static_cast<float>(
+                    contentHeight + 2 * padding);
+                layout.commands[backgroundIndex].rect.h = rowHeight;
+                y += rowHeight;
+
+                RichResponseLayout::Impl::Command line;
+                line.kind = RichResponseLayout::Impl::CommandKind::Rectangle;
+                line.rect = SDL_FRect{
+                    0.0f, y - 1.0f, static_cast<float>(width), 1.0f
+                };
+                line.color = separatorColor;
+                layout.commands.push_back(std::move(line));
+            }
+            y += 11.0f;
+        }
+
+
         void layoutCodeBlock(
             RichResponseLayout::Impl& layout,
             const ResponseBlock& block,
@@ -1283,10 +1419,12 @@ namespace rose::ui
             try
             {
                 MathTexture math =
-                    mathRenderer_.renderDisplayMath(
+                    mathRenderer_
+                        ? mathRenderer_->renderDisplayMath(
                         block.text,
                         width,
-                        26.0f);
+                        26.0f)
+                        : MathTexture{};
 
                 if (math)
                 {
@@ -1323,7 +1461,8 @@ namespace rose::ui
             fallback.spans.push_back(
                 InlineSpan{
                     .style = InlineStyle::Code,
-                    .text = block.text
+                    .text = makeReadableChatText(
+                        std::string{ "$$" } + block.text + "$$")
                 });
 
             layoutParagraph(
@@ -1393,6 +1532,10 @@ namespace rose::ui
                         block,
                         width,
                         y);
+                    break;
+
+                case ResponseBlockKind::Table:
+                    layoutTable(*result, block, width, y);
                     break;
 
                 case ResponseBlockKind::Separator:

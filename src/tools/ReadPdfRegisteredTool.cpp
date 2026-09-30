@@ -7,7 +7,9 @@
 #include "tools/ReadFileTool.h"
 
 #include <charconv>
+#include <algorithm>
 #include <filesystem>
+#include <limits>
 #include <optional>
 #include <stdexcept>
 #include <string>
@@ -44,9 +46,16 @@ namespace rose::tools
             const ToolRequest& request)
         {
             const auto found = request.arguments.find("instruction");
+            // A whole multi-file request can contain many pages of directions.
+            // The final response still receives it; the per-page worker needs
+            // only a compact reading objective.
             return found == request.arguments.end()
                 ? std::string_view{}
-                : std::string_view{ found->second };
+                : found->second.size() > 1024u
+                    ? std::string_view{
+                        "Preserve material facts, dates, page references, rules, "
+                        "decisions, reasons, and limitations from this PDF." }
+                    : std::string_view{ found->second };
         }
 
 
@@ -230,36 +239,105 @@ namespace rose::tools
 
         permissions_.grantReadOnce(path);
 
-        // FPDF_LoadMemDocument64 requires the complete backing bytes to stay
-        // alive while the PDFium document is open. Keep that potentially large
-        // allocation in the narrow extraction scope so a 281 MiB document does
-        // not remain resident during later model synthesis.
+        // Each extraction is bounded, but the review advances through every
+        // requested page window. Keep PDF backing bytes alive across windows;
+        // PDFium opens one window at a time and never feeds the full source to
+        // the language model in a single prompt.
+        const ReadBinaryFileResult file = readFileTool_.readBinaryFile(
+            path, maximumPdfBinaryBytes);
+        constexpr std::size_t pagesPerWindow{ 32u };
+        std::size_t nextPage = selection.startPage;
+        std::size_t remaining = selection.pageCount.value_or(
+            (std::numeric_limits<std::size_t>::max)());
         ExtractedPdfDocument pdf;
-        std::uintmax_t sourceFileBytes{ 0 };
+        documents::ContextSafeDocumentSynthesisResult synthesis;
+        std::string windowNotes;
+        std::size_t analysisWindows{ 0 };
+        std::size_t analysisChunks{ 0 };
+        bool incomplete{ false };
+        std::string interruption;
+        while (remaining > 0u)
         {
-            const ReadBinaryFileResult file =
-                readFileTool_.readBinaryFile(
-                    path,
-                    maximumPdfBinaryBytes);
-            sourceFileBytes = file.originalSize;
-            pdf = extractor_.extract(
-                file,
-                *ocrEngine_,
-                selection);
+            std::size_t count = (std::min)(pagesPerWindow, remaining);
+            ExtractedPdfDocument window;
+            try
+            {
+                // A dense page or OCR bound may overflow even a 32-page
+                // window. Halve and retry without skipping the affected page.
+                while (true)
+                {
+                    window = extractor_.extract(file, *ocrEngine_,
+                        PdfPageSelection{ .startPage = nextPage,
+                            .pageCount = count });
+                    if (!window.truncated || count == 1u) break;
+                    count = (std::max)(std::size_t{ 1u }, count / 2u);
+                }
+                if (analysisWindows == 0u)
+                {
+                    pdf.pageCount = window.pageCount;
+                    pdf.selectedPageStart = window.selectedPageStart;
+                    const std::size_t available = static_cast<std::size_t>(
+                        window.pageCount - window.selectedPageStart + 1);
+                    const std::size_t requested = selection.pageCount.value_or(available);
+                    pdf.selectedPageCount = static_cast<int>((std::min)(requested, available));
+                    pdf.selectedPageEnd = pdf.selectedPageStart + pdf.selectedPageCount - 1;
+                    remaining = static_cast<std::size_t>(pdf.selectedPageCount);
+                }
+
+                const auto part = synthesizer_.synthesize(
+                    window.text, "pdf", instructionArgument(request));
+                windowNotes += "\n--- PDF PAGES "
+                    + std::to_string(window.selectedPageStart) + "-"
+                    + std::to_string(window.selectedPageEnd) + " ---\n"
+                    + (window.text.empty() ? "No extractable text."
+                        : part.text) + "\n";
+                synthesis.sourceBytes += part.sourceBytes;
+                synthesis.processedBytes += part.processedBytes;
+                synthesis.sourceTruncated |= part.sourceTruncated;
+                synthesis.synthesized |= part.synthesized;
+                analysisChunks += part.chunkCount;
+                incomplete |= window.truncated || window.requiresOcr
+                    || part.sourceTruncated;
+                pdf.pagesExamined += window.pagesExamined;
+                pdf.pagesWithText += window.pagesWithText;
+                pdf.pagesOcred += window.pagesOcred;
+                pdf.pagesWithoutText += window.pagesWithoutText;
+                ++analysisWindows;
+                remaining -= static_cast<std::size_t>(window.selectedPageCount);
+                nextPage += static_cast<std::size_t>(window.selectedPageCount);
+            }
+            catch (const std::exception& exception)
+            {
+                if (analysisWindows == 0u) throw;
+                incomplete = true;
+                interruption = "Review stopped at page " + std::to_string(nextPage)
+                    + ": " + exception.what();
+                break;
+            }
         }
 
-        if (pdf.text.empty())
-        {
+        if (windowNotes.empty() || pdf.pagesWithText == 0)
             throw std::runtime_error{
-                "The PDF contained no extractable or OCR-recognized text."
-            };
-        }
+                "The PDF contained no extractable or OCR-recognized text." };
 
-        const documents::ContextSafeDocumentSynthesisResult synthesis =
-            synthesizer_.synthesize(
-                pdf.text,
-                "pdf",
-                instructionArgument(request));
+        // Condense the page-labelled window notes only after every window was
+        // visited. The source coverage counters refer to actual extraction,
+        // not to the shorter final note used for conversational synthesis.
+        if (analysisWindows == 1u)
+        {
+            synthesis.text = std::move(windowNotes);
+        }
+        else
+        {
+            const auto combined = synthesizer_.synthesize(windowNotes,
+                "pdf page-window notes", instructionArgument(request));
+            synthesis.text = combined.text;
+            synthesis.synthesized = true;
+            synthesis.sourceTruncated |= combined.sourceTruncated;
+            incomplete |= combined.sourceTruncated;
+        }
+        synthesis.chunkCount = analysisChunks;
+        pdf.truncated = incomplete;
 
         const bool pageWindowLimited =
             pdf.selectedPageStart != 1
@@ -281,7 +359,7 @@ namespace rose::tools
 
         std::string message =
             "Read PDF: " + path.string()
-            + "\nsource_file_bytes=" + std::to_string(sourceFileBytes)
+            + "\nsource_file_bytes=" + std::to_string(file.originalSize)
             + "\npages=" + std::to_string(pdf.pageCount)
             + "\nselected_page_start=" + std::to_string(pdf.selectedPageStart)
             + "\nselected_page_end=" + std::to_string(pdf.selectedPageEnd)
@@ -296,6 +374,8 @@ namespace rose::tools
             + "\ncoverage=" + coverage
             + "\ncontent_mode=" + std::string{ synthesis.synthesized ? "hierarchical_summary" : "raw" }
             + "\nanalysis_chunks=" + std::to_string(synthesis.chunkCount)
+            + "\nanalysis_windows=" + std::to_string(analysisWindows)
+            + (interruption.empty() ? "" : "\n" + interruption)
             + "\n<rose_untrusted_pdf_content>\n"
             + synthesis.text
             + "\n</rose_untrusted_pdf_content>";

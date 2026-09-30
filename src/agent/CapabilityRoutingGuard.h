@@ -72,6 +72,22 @@ namespace rose::agent
             std::string_view userText,
             const tools::ToolRegistry& toolRegistry);
 
+        [[nodiscard]]
+        static std::optional<tools::ToolRequest> explicitOnlineSearchRequest(
+            std::string_view userText,
+            const tools::ToolRegistry& toolRegistry);
+
+        static bool explicitOnlineSearchIntent(std::string_view userText);
+
+        // Exact parent + quoted new folder + one named empty/shell file.
+        [[nodiscard]]
+        static std::optional<tools::ToolRequest> explicitNewFolderAndFileRequest(
+            std::string_view userText,
+            const tools::ToolRegistry& toolRegistry);
+
+        [[nodiscard]]
+        static bool explicitFilesystemMutationRequest(std::string_view userText);
+
         // Quoted, explicitly named PDF files are a file-scoped task. A request
         // naming several PDFs becomes one confirmation-gated bounded batch,
         // never a parent-directory analysis selected by the control model.

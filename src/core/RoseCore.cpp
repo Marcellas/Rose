@@ -1,5 +1,7 @@
 #include "core/RoseCore.h"
 
+#include "documents/ContextSafeDocumentSynthesizer.h"
+
 #include "memory/IMemoryObserver.h"
 #include "memory/IMemoryRetriever.h"
 #include "memory/MemoryTypes.h"
@@ -8,7 +10,9 @@
 #include "policy/ContentPolicy.h"
 
 #include <sstream>
+#include <algorithm>
 #include <stdexcept>
+#include <cctype>
 #include <string>
 #include <utility>
 #include <vector>
@@ -243,7 +247,11 @@ namespace rose::core
             "delay useful work for a joke. Use relevant conversation context. "
             "For legal questions, separate facts, uncertainty, and possible next "
             "steps. For coding, inspect evidence, explain design and data flow, "
-            "and verify changes where tools permit. Do not claim to have read "
+            "and verify changes where tools permit. Consider plausible alternatives "
+            "against the evidence before choosing a finite next action. Tool "
+            "snippets and earlier assistant prose are not proof of file contents "
+            "or completed actions. When using online search, cite result URLs "
+            "near claims and say when only snippets were reviewed. Do not claim to have read "
             "the screen, searched online, or changed files unless you actually did.";
 
         systemPrompt +=
@@ -332,6 +340,7 @@ namespace rose::core
         // Exact provider-side token accounting decides the final working context.
         // We remove only complete historical user/assistant pairs; the system prompt
         // and current user submission (including its transient attachments) survive.
+        bool condensedTransientContext{ false };
         while (true)
         {
             const model::ModelContextUsage usage =
@@ -368,9 +377,94 @@ namespace rose::core
                 continue;
             }
 
+            if (!condensedTransientContext && !requestTransientContext.empty())
+            {
+                condensedTransientContext = true;
+                documents::ContextSafeDocumentSynthesizer reducer{
+                    *modelProvider_,
+                    documents::ContextSafeDocumentSynthesisConfig{
+                        .maximumRawObservationBytes = 1024u,
+                        .chunkBytes = 12u * 1024u,
+                        .maximumSourceBytes = 2u * 1024u * 1024u,
+                        .reductionGroupSize = 4u,
+                        .maximumFinalBytes = 6u * 1024u,
+                        .chunkSummaryTokens = 384,
+                        .reductionTokens = 768
+                    } };
+                const auto reduced = reducer.synthesize(
+                    requestTransientContext,
+                    "transient tool evidence",
+                    "Preserve completed actions, failures, exact file coverage, "
+                    "page references, competing findings and uncertainty. "
+                    "Never invent evidence or treat a failed read as complete.");
+                request.messages.back().content = userText
+                    + "\n\n<rose_transient_context>\n"
+                    + "Condensed tool evidence for this response; the original "
+                      "user request remains verbatim. "
+                    + (reduced.sourceTruncated
+                        ? "The evidence reduction hit its source limit; disclose "
+                          "that the available evidence is incomplete.\n"
+                        : "\n")
+                    + reduced.text + "\n</rose_transient_context>";
+                continue;
+            }
+
             throw std::runtime_error{
                 "This message and its attached context are too large to process in one request."
             };
+        }
+
+        // One short, private evidence review on complex tool-backed questions.
+        // It is an option check, not an open-ended chain of model calls. The
+        // assistant's final request still contains the original tool evidence.
+        const std::string loweredRequest = [&]() {
+            std::string lowered = userText;
+            for (char& c : lowered)
+                c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+            return lowered;
+        }();
+        const bool needsReview = requestTransientContext.find(
+                "<rose_tool_observation>") != std::string::npos
+            && (loweredRequest.find("analy") != std::string::npos
+                || loweredRequest.find("review") != std::string::npos
+                || loweredRequest.find("compar") != std::string::npos
+                || loweredRequest.find("diagnos") != std::string::npos
+                || loweredRequest.find("reason") != std::string::npos);
+        if (needsReview)
+        {
+            const std::string originalEvidence = request.messages.back().content;
+            try
+            {
+                model::ModelRequest review = request;
+                review.messages.front().content =
+                    "Privately check the evidence for Rose's next reply. In at "
+                    "most 160 words, name up to two plausible interpretations, "
+                    "what observation supports each, any gap, and the finite "
+                    "next action. Never claim an action ran without tool evidence. "
+                    "Return notes only. /no_think";
+                review.maxGeneratedTokens = 256;
+                review.sampling.temperature = 0.15f;
+                if (modelProvider_->inspectContext(review).fits())
+                {
+                    const auto notes = modelProvider_->generate(review);
+                    if (!notes.text.empty() && notes.text.size() <= 1200)
+                    {
+                        request.messages.back().content +=
+                            "\n\n<rose_private_review>\n"
+                            "Use these as hypotheses only; verify against the "
+                            "original tool evidence. Do not quote these notes.\n"
+                            + notes.text + "\n</rose_private_review>";
+                        if (!modelProvider_->inspectContext(request).fits())
+                            request.messages.back().content = originalEvidence;
+                    }
+                }
+            }
+            catch (const std::exception& exception)
+            {
+                request.messages.back().content = originalEvidence;
+                logger_.debug("RoseCore", std::string{
+                    "Optional bounded evidence review skipped: " } + exception.what());
+            }
         }
 
 
@@ -425,6 +519,89 @@ namespace rose::core
                 response =
                     modelProvider_->generate(
                         request);
+            }
+
+            // A model's per-call generation budget is finite. Continue a reply
+            // automatically a bounded number of times, keeping the original
+            // user request and its source context in each follow-up. If that
+            // context cannot fit, say so in the transcript instead of silently
+            // presenting an incomplete answer as finished.
+            constexpr int maximumContinuationCalls{ 2 };
+            for (int continuation = 0;
+                 continuation < maximumContinuationCalls
+                     && response.finishReason == model::ModelFinishReason::TokenLimit
+                     && !response.text.empty();
+                 ++continuation)
+            {
+                model::ModelRequest next = request;
+                next.messages.push_back(model::ModelMessage{
+                    .role = model::ModelRole::Assistant,
+                    .content = response.text.substr(
+                        response.text.size() > 6000
+                            ? response.text.size() - 6000 : 0)
+                });
+                next.messages.push_back(model::ModelMessage{
+                    .role = model::ModelRole::User,
+                    .content = "Continue the answer at the point it stopped. "
+                        "Do not repeat earlier sections or invent source material. "
+                        "If you cannot finish the task from the available evidence, "
+                        "state exactly what remains."
+                });
+                while (!modelProvider_->inspectContext(next).fits()
+                    && next.messages.size() >= 6)
+                {
+                    next.messages.erase(next.messages.begin() + 1,
+                        next.messages.begin() + 3);
+                }
+                if (!modelProvider_->inspectContext(next).fits()) break;
+
+                model::ModelResponse part;
+                std::string streamedPart;
+                const model::ModelTextCallback continuedText =
+                    [&](std::string_view text)
+                    {
+                        if (text.empty()) return;
+                        if (streamedPart.empty() && !response.text.ends_with('\n')
+                            && onText) onText("\n");
+                        streamedPart += text;
+                        streamedText(text);
+                    };
+                try
+                {
+                    if (onText || onActivity)
+                        part = modelProvider_->generateStreaming(next, continuedText);
+                    else
+                        part = modelProvider_->generate(next);
+                }
+                catch (const std::exception& exception)
+                {
+                    logger_.warning("RoseCore", std::string{
+                        "Response continuation failed: " } + exception.what());
+                    if (!streamedPart.empty())
+                    {
+                        if (!response.text.ends_with('\n')) response.text += '\n';
+                        response.text += streamedPart;
+                    }
+                    break;
+                }
+                if (part.text.empty()) break;
+                if (!response.text.ends_with('\n'))
+                {
+                    response.text += '\n';
+                    if (onText && streamedPart.empty()) onText("\n");
+                }
+                if (onText && streamedPart.empty()) onText(part.text);
+                response.text += part.text;
+                response.generatedTokens += part.generatedTokens;
+                response.finishReason = part.finishReason;
+            }
+            if (response.finishReason == model::ModelFinishReason::TokenLimit)
+            {
+                constexpr std::string_view notice =
+                    "\n\n[Response paused at the model's context or generation "
+                    "limit. The discussion is saved; ask for a focused continuation.]";
+                response.text += notice;
+                if (onText) onText(notice);
             }
 
 

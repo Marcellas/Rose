@@ -16,15 +16,16 @@ namespace rose::tools
 
     struct PdfTextExtractorConfig
     {
-        // Extracted document text is transient model context. Keep it bounded.
+        // Limit one extraction window; ReadPdfRegisteredTool advances through
+        // the requested pages in repeated windows rather than stopping here.
         std::size_t maximumExtractedUtf8Bytes{ 24u * 1024u };
 
         // Embedded text shorter than this is treated as suspicious (often only a
         // page number/watermark on an otherwise scanned page) and OCR is attempted.
         std::size_t minimumEmbeddedNonWhitespaceCharacters{ 24u };
 
-        // Scanned documents can be enormous. OCR is deliberately bounded for one
-        // interactive request; long-document retrieval comes later.
+        // Bound OCR work per extraction window. The registered reader continues
+        // with the next window to cover a larger requested page range.
         std::size_t maximumOcrPages{ 12u };
 
         // Roughly 200 DPI is a good first-pass balance for ordinary office scans.

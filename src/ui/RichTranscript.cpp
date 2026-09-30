@@ -15,7 +15,9 @@
 #endif
 
 #include <algorithm>
+#include <cstdint>
 #include <memory>
+#include <iostream>
 #include <optional>
 #include <string>
 #include <utility>
@@ -23,6 +25,22 @@
 
 namespace rose::ui
 {
+    namespace
+    {
+        // The canonical entry remains available for copy. SDL_ttf only shapes a
+        // bounded preview so one pasted log cannot stall the chat on open/resize.
+        std::string layoutPreview(std::string_view text)
+        {
+            constexpr std::size_t maximumBytes{ 4096 };
+            if (text.size() <= maximumBytes) return std::string{ text };
+            std::size_t start = text.size() - maximumBytes;
+            while (start < text.size()
+                && (static_cast<unsigned char>(text[start]) & 0xC0u) == 0x80u)
+                ++start;
+            return "[Earlier text is retained; copy the message for its full content.]\n\n"
+                + std::string{ text.substr(start) };
+        }
+    }
 
     namespace
     {
@@ -123,6 +141,8 @@ namespace rose::ui
             int layoutWidth{ 0 };
             int renderHeight{ 0 };
             std::optional<ArtifactVisual> artifact;
+            SDL_FRect lastClickRect{};
+            bool hasClickableRegion{ false };
         };
 
 
@@ -136,12 +156,20 @@ namespace rose::ui
         RichResponseLayout streamingLayout_;
         int streamingLayoutWidth_{ 0 };
         bool streamingDirty_{ true };
+        int requestedWidth_{ 0 };
+        int settledWidth_{ 0 };
+        std::uint64_t widthChangedAt_{ 0 };
 
         float scrollOffset_{ 0.0f };
         float maxScrollOffset_{ 0.0f };
         bool followLatest_{ true };
+        std::optional<float> pendingScrollFraction_;
 
         SDL_FRect lastViewport_{};
+        SDL_FRect lastScrollbarTrack_{};
+        float lastScrollbarThumbHeight_{ 0.0f };
+        SDL_FRect lastStreamingRect_{};
+        bool hasStreamingRegion_{ false };
 
 
         explicit Impl(
@@ -182,7 +210,7 @@ namespace rose::ui
             appendDocument(
                 makePlainResponseDocument(
                     "You: ",
-                    text),
+                    layoutPreview(text)),
                 std::string{ "You: " }
                     + std::string{ text });
 
@@ -235,7 +263,7 @@ namespace rose::ui
             if (!finalText.empty() || assistantStreaming_)
             {
                 ResponseDocument document =
-                    parseResponseDocument(finalText);
+                    parseResponseDocument(layoutPreview(finalText));
 
                 prependDocumentLabel(
                     document,
@@ -323,7 +351,7 @@ namespace rose::ui
             appendDocument(
                 makePlainResponseDocument(
                     "Error: ",
-                    text),
+                    layoutPreview(text)),
                 std::string{ "Error: " }
                     + std::string{ text });
 
@@ -333,6 +361,16 @@ namespace rose::ui
             streamingLayoutWidth_ = 0;
             streamingDirty_ = true;
             followLatest_ = true;
+        }
+
+
+        void appendPlainMessage(
+            const std::string_view label,
+            const std::string_view text)
+        {
+            appendDocument(
+                makePlainResponseDocument(label, layoutPreview(text)),
+                std::string{ label } + std::string{ text });
         }
 
 
@@ -349,7 +387,9 @@ namespace rose::ui
             scrollOffset_ = 0.0f;
             maxScrollOffset_ = 0.0f;
             followLatest_ = true;
+            pendingScrollFraction_.reset();
             lastViewport_ = {};
+            hasStreamingRegion_ = false;
         }
 
 
@@ -385,6 +425,35 @@ namespace rose::ui
         }
 
 
+        [[nodiscard]]
+        std::optional<std::string> messageAt(
+            const float x,
+            const float y) const
+        {
+            if (!pointInside(lastViewport_, x, y))
+            {
+                return std::nullopt;
+            }
+
+            for (const Entry& entry : entries_)
+            {
+                if (entry.hasClickableRegion
+                    && pointInside(entry.lastClickRect, x, y))
+                {
+                    return entry.copyText;
+                }
+            }
+
+            if (assistantStreaming_ && hasStreamingRegion_
+                && pointInside(lastStreamingRect_, x, y))
+            {
+                return std::string{ "Rose: " } + streamingAssistantText_;
+            }
+
+            return std::nullopt;
+        }
+
+
         void scrollBy(
             const float deltaPixels)
         {
@@ -400,6 +469,40 @@ namespace rose::ui
                 scrollOffset_
                 >= maxScrollOffset_
                 - bottomTolerance;
+        }
+
+
+        [[nodiscard]] float scrollFraction() const noexcept
+        {
+            return maxScrollOffset_ > 0.0f
+                ? scrollOffset_ / maxScrollOffset_
+                : 1.0f;
+        }
+
+
+        void setScrollFraction(const float fraction)
+        {
+            const float bounded = std::clamp(fraction, 0.0f, 1.0f);
+            pendingScrollFraction_ = bounded;
+            scrollOffset_ = bounded * maxScrollOffset_;
+            followLatest_ = bounded >= 0.999f;
+        }
+
+        [[nodiscard]] bool beginScrollbarDrag(const float x, const float y)
+        {
+            if (maxScrollOffset_ <= 0.0f
+                || !pointInside(lastScrollbarTrack_, x, y)) return false;
+            dragScrollbar(y);
+            return true;
+        }
+
+        void dragScrollbar(const float y)
+        {
+            if (maxScrollOffset_ <= 0.0f) return;
+            const float travel = std::max(
+                1.0f, lastScrollbarTrack_.h - lastScrollbarThumbHeight_);
+            setScrollFraction((y - lastScrollbarTrack_.y
+                - lastScrollbarThumbHeight_ / 2.0f) / travel);
         }
 
 
@@ -437,11 +540,15 @@ namespace rose::ui
         void ensureLayouts(
             const int width)
         {
+            const std::uint64_t started = SDL_GetTicks();
             constexpr int artifactGap{ 10 };
             constexpr int cardPadding{ 10 };
 
-            for (Entry& entry : entries_)
+            // Shape recent turns first, then fill in older turns over frames.
+            std::size_t shaped{ 0 };
+            for (auto it = entries_.rbegin(); it != entries_.rend(); ++it)
             {
+                Entry& entry = *it;
                 if (
                     !entry.layout
                     || entry.layoutWidth != width)
@@ -482,6 +589,7 @@ namespace rose::ui
                         entry.renderHeight =
                             entry.layout.height();
                     }
+                    if (++shaped == 2) break;
                 }
             }
 
@@ -496,7 +604,7 @@ namespace rose::ui
                     const ResponseDocument streamingDocument =
                         makePlainResponseDocument(
                             "Rose: ",
-                            streamingAssistantText_);
+                            layoutPreview(streamingAssistantText_));
 
                     streamingLayout_ =
                         responseRenderer_.layout(
@@ -513,6 +621,10 @@ namespace rose::ui
                 streamingLayoutWidth_ = 0;
                 streamingDirty_ = false;
             }
+            const std::uint64_t elapsed = SDL_GetTicks() - started;
+            if (elapsed >= 100)
+                std::cerr << "[Rose UI slow] formatted text layout: "
+                    << elapsed << " ms\n";
         }
 
 
@@ -526,6 +638,7 @@ namespace rose::ui
 
             for (const Entry& entry : entries_)
             {
+                if (!entry.layout) continue;
                 if (haveContent)
                 {
                     height += turnGap;
@@ -602,6 +715,9 @@ namespace rose::ui
         {
             if (width <= 0 || height <= 0)
             {
+                lastViewport_ = {};
+                lastScrollbarTrack_ = {};
+                hasStreamingRegion_ = false;
                 return;
             }
 
@@ -617,8 +733,15 @@ namespace rose::ui
                     width
                     - scrollbarGap
                     - scrollbarWidth);
-
-            ensureLayouts(contentWidth);
+            const std::uint64_t now = SDL_GetTicks();
+            if (requestedWidth_ != contentWidth)
+            {
+                requestedWidth_ = contentWidth;
+                widthChangedAt_ = now;
+            }
+            if (settledWidth_ == 0 || now - widthChangedAt_ >= 180)
+                settledWidth_ = contentWidth;
+            ensureLayouts(settledWidth_);
 
             const int totalHeight =
                 contentHeight();
@@ -628,6 +751,12 @@ namespace rose::ui
                     0.0f,
                     static_cast<float>(
                         totalHeight - height));
+
+            if (pendingScrollFraction_)
+            {
+                scrollOffset_ = *pendingScrollFraction_ * maxScrollOffset_;
+                pendingScrollFraction_.reset();
+            }
 
             if (followLatest_)
             {
@@ -651,6 +780,7 @@ namespace rose::ui
 
             for (Entry& entry : entries_)
             {
+                entry.hasClickableRegion = false;
                 if (entry.artifact.has_value())
                 {
                     entry.artifact->hasClickableRegion = false;
@@ -679,6 +809,7 @@ namespace rose::ui
 
             for (Entry& entry : entries_)
             {
+                if (!entry.layout) continue;
                 if (haveContent)
                 {
                     cursorY +=
@@ -694,6 +825,13 @@ namespace rose::ui
                     entryBottom >= static_cast<float>(y)
                     && cursorY <= static_cast<float>(y + height))
                 {
+                    entry.lastClickRect = SDL_FRect{
+                        static_cast<float>(x), cursorY,
+                        static_cast<float>(contentWidth),
+                        static_cast<float>(entry.renderHeight)
+                    };
+                    entry.hasClickableRegion = true;
+
                     if (!entry.artifact.has_value())
                     {
                         responseRenderer_.draw(
@@ -803,6 +941,7 @@ namespace rose::ui
             }
 
 
+            hasStreamingRegion_ = false;
             if (assistantStreaming_ && streamingLayout_)
             {
                 if (haveContent)
@@ -820,6 +959,12 @@ namespace rose::ui
                     streamBottom >= static_cast<float>(y)
                     && cursorY <= static_cast<float>(y + height))
                 {
+                    lastStreamingRect_ = SDL_FRect{
+                        static_cast<float>(x), cursorY,
+                        static_cast<float>(contentWidth),
+                        static_cast<float>(streamingLayout_.height())
+                    };
+                    hasStreamingRegion_ = true;
                     responseRenderer_.draw(
                         streamingLayout_,
                         static_cast<float>(x),
@@ -833,6 +978,7 @@ namespace rose::ui
 
             if (maxScrollOffset_ <= 0.0f)
             {
+                lastScrollbarTrack_ = {};
                 return;
             }
 
@@ -843,6 +989,7 @@ namespace rose::ui
                 static_cast<float>(scrollbarWidth),
                 static_cast<float>(height)
             };
+            lastScrollbarTrack_ = scrollbarTrack;
 
             SDL_SetRenderDrawColor(
                 &renderer_,
@@ -866,10 +1013,11 @@ namespace rose::ui
             constexpr float minimumThumbHeight{ 28.0f };
 
             const float thumbHeight =
-                std::max(
+                std::min(scrollbarTrack.h, std::max(
                     minimumThumbHeight,
                     scrollbarTrack.h
-                    * visibleFraction);
+                    * visibleFraction));
+            lastScrollbarThumbHeight_ = thumbHeight;
 
             const float thumbTravel =
                 std::max(
@@ -968,6 +1116,14 @@ namespace rose::ui
     }
 
 
+    void RichTranscript::appendPlainMessage(
+        const std::string_view label,
+        const std::string_view text)
+    {
+        impl_->appendPlainMessage(label, text);
+    }
+
+
     void RichTranscript::clear()
     {
         impl_->clear();
@@ -980,10 +1136,40 @@ namespace rose::ui
     }
 
 
+    std::optional<std::string> RichTranscript::messageAt(
+        const float x,
+        const float y) const
+    {
+        return impl_->messageAt(x, y);
+    }
+
+
     void RichTranscript::scrollBy(
         const float deltaPixels)
     {
         impl_->scrollBy(deltaPixels);
+    }
+
+
+    float RichTranscript::scrollFraction() const noexcept
+    {
+        return impl_->scrollFraction();
+    }
+
+
+    void RichTranscript::setScrollFraction(const float fraction)
+    {
+        impl_->setScrollFraction(fraction);
+    }
+
+    bool RichTranscript::beginScrollbarDrag(const float x, const float y)
+    {
+        return impl_->beginScrollbarDrag(x, y);
+    }
+
+    void RichTranscript::dragScrollbar(const float y)
+    {
+        impl_->dragScrollbar(y);
     }
 
 

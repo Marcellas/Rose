@@ -398,7 +398,8 @@ namespace rose::agent
             return;
         }
 
-        if (request.toolId == "create_text_file")
+        if (request.toolId == "create_text_file"
+            || request.toolId == "create_directory_with_text_file")
         {
             const auto path =
                 request.arguments.find(

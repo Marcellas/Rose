@@ -30,6 +30,7 @@ namespace
         : public rose::model::IModelProvider
     {
     public:
+        int capacity{ 8192 };
         [[nodiscard]]
         rose::model::ModelResponse generate(
             const rose::model::ModelRequest& request) override
@@ -65,7 +66,7 @@ namespace
 
             return rose::model::ModelContextUsage{
                 .promptTokens = static_cast<std::int32_t>(bytes / 4u),
-                .contextCapacity = 8192,
+                .contextCapacity = capacity,
                 .requestedGenerationTokens = request.maxGeneratedTokens
             };
         }
@@ -144,6 +145,26 @@ int main()
 
         require(instructionObserved,
                 "user analysis intent should be preserved through chunk synthesis");
+    }
+
+    {
+        RecordingModelProvider narrow;
+        narrow.capacity = 1000;
+        rose::documents::ContextSafeDocumentSynthesizer adaptive{
+            narrow,
+            rose::documents::ContextSafeDocumentSynthesisConfig{
+                .maximumRawObservationBytes = 64,
+                .chunkBytes = 4096,
+                .maximumSourceBytes = 5000,
+                .reductionGroupSize = 3,
+                .maximumFinalBytes = 512,
+                .chunkSummaryTokens = 64,
+                .reductionTokens = 96
+            } };
+        const auto result = adaptive.synthesize(std::string(3900, 'A'),
+            "pdf", "read all pages");
+        require(result.chunkCount > 1 && !narrow.requests.empty(),
+            "oversized model chunks should split and retry without dropping text");
     }
 
     std::cout

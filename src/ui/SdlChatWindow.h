@@ -7,8 +7,10 @@
 #include "ui/TextEditHistory.h"
 #include "ui/InputRecallHistory.h"
 #include "platform/TtfRuntime.h"
+#include "ui/RichTranscript.h"
 
 #include <cstddef>
+#include <cstdint>
 #include <filesystem>
 #include <memory>
 #include <optional>
@@ -161,6 +163,8 @@ namespace rose::ui
         std::string buildTranscriptText() const;
 
         void refreshTranscriptText();
+
+        void setFormattedTranscript(bool formatted);
 
         void submitInput();
 
@@ -427,6 +431,42 @@ namespace rose::ui
             Transcript
         };
 
+        enum class ScrollDrag
+        {
+            None,
+            Composer,
+            Transcript,
+            FormattedTranscript
+        };
+
+        struct ScrollbarSnapshot
+        {
+            float x{ 0.0f };
+            float y{ 0.0f };
+            float width{ 0.0f };
+            float height{ 0.0f };
+            float thumbHeight{ 0.0f };
+            float maximumOffset{ 0.0f };
+        };
+
+        void dragScrollbar(float mouseY);
+
+        enum class PageScrollTarget
+        {
+            None,
+            Top,
+            Bottom
+        };
+
+        static constexpr std::size_t transcriptPageSize{ 8 };
+        static constexpr std::size_t transcriptPageOverlap{ 4 };
+        void appendTranscriptEntry(std::string display, std::string original = {});
+        void showLatestTranscriptPage();
+        void showOlderTranscriptPage();
+        void showNewerTranscriptPage();
+        void prepareTranscriptPage();
+        void rebuildRichTranscriptPage();
+
         struct TextLayoutSnapshot
         {
             bool valid{ false };
@@ -540,12 +580,28 @@ namespace rose::ui
         // font_ and textEngine_ and is destroyed before them.
         TextPtr attachmentSummaryText_;
 
+        TextPtr transcriptToggleText_;
+
+        // Rich messages share the UI renderer and text engine. The selectable
+        // text view remains available through the transcript header switch.
+        std::unique_ptr<RichTranscript> richTranscript_;
+        // Precise selection is available immediately; formatting is optional.
+        bool formattedTranscript_{ false };
+        float transcriptToggleX_{ 0.0f };
+        float transcriptToggleY_{ 0.0f };
+        float transcriptToggleWidth_{ 0.0f };
+        float transcriptToggleHeight_{ 0.0f };
+
         // Artifact cards own only UI presentation resources (TTF text + image
         // textures). Artifact files themselves remain owned by ArtifactStore.
         std::unique_ptr<ArtifactCardStack> artifactCards_;
 
         // Canonical composer contents. Visual wrapping is presentation only.
         std::string inputText_;
+        // SDL_ttf sees a short slice; these offsets map it to the full draft.
+        std::size_t inputDisplayStartOffset_{ 0 };
+        std::size_t inputDisplayEndOffset_{ 0 };
+        std::string inputWindowTitle_{ "Rose" };
 
         // UTF-8 byte offset into inputText_. This is never allowed to point into
         // the middle of a multi-byte UTF-8 code point.
@@ -566,9 +622,17 @@ namespace rose::ui
 
         // Width currently applied to inputTextObject_ for word wrapping.
         int inputWrapWidth_{ 0 };
+        int inputTextWidth_{ 0 };
+        int inputTextHeight_{ 0 };
+        bool inputLayoutDirty_{ true };
+        int requestedLayoutWidth_{ 0 };
+        int settledLayoutWidth_{ 0 };
+        std::uint64_t layoutWidthChangedAt_{ 0 };
 
         // Vertical scroll inside the composer once it reaches its maximum height.
         float inputScrollOffsetY_{ 0.0f };
+        float inputMaxScrollOffsetY_{ 0.0f };
+        bool inputCaretScrollPending_{ true };
 
         // Horizontal pixel column retained while moving repeatedly with Up/Down.
         // A negative value means the next vertical movement should capture the
@@ -584,6 +648,15 @@ namespace rose::ui
         float stagedImageHeight_{ 0.0f };
 
         std::vector<std::string> transcript_;
+        // Original text is retained for formatted rendering. Only the current
+        // page is ever handed to SDL_ttf or the rich renderer.
+        std::vector<std::string> transcriptOriginal_;
+        std::size_t transcriptPageStart_{ 0 };
+        std::size_t transcriptPageEnd_{ 0 };
+        PageScrollTarget pageScrollTarget_{ PageScrollTarget::None };
+        bool richPageDirty_{ true };
+        std::size_t richStreamingBytes_{ 0 };
+        std::uint64_t lastRichStreamRefreshTicks_{ 0 };
 
         std::string streamingAssistantText_;
 
@@ -596,6 +669,9 @@ namespace rose::ui
 
         TextFocus textFocus_{ TextFocus::Composer };
         SelectionDrag selectionDrag_{ SelectionDrag::None };
+        ScrollDrag scrollDrag_{ ScrollDrag::None };
+        ScrollbarSnapshot composerScrollbar_;
+        ScrollbarSnapshot transcriptScrollbar_;
         TextLayoutSnapshot textLayout_;
 
         bool contextMenuOpen_{ false };
@@ -604,6 +680,7 @@ namespace rose::ui
         int contextMenuHoveredItem_{ -1 };
         ContextMenuLayout contextMenuLayout_;
         std::optional<ByteRange> contextMenuMessageRange_;
+        std::optional<std::string> contextMenuFormattedMessage_;
 
         // The canonical transcript data above changes independently from SDL_ttf.
         //
@@ -615,6 +692,9 @@ namespace rose::ui
         // Avoid recalculating wrapped layout every frame when the window width has not
         // changed.
         int transcriptWrapWidth_{ 0 };
+        int transcriptTextHeight_{ 0 };
+        bool transcriptLayoutDirty_{ true };
+        std::uint64_t lastTranscriptRefreshTicks_{ 0 };
 
         // -----------------------------------------------------------------------------
         // Transcript scrolling

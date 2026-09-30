@@ -303,21 +303,20 @@ namespace rose::documents
             boundedSource.size() < extractedText.size();
         result.processedBytes = boundedSource.size();
 
-        const std::vector<std::string> chunks =
+        std::vector<std::string> chunks =
             splitChunks(
                 boundedSource,
                 config_.chunkBytes);
-
-        result.chunkCount = chunks.size();
         result.synthesized = true;
 
         std::vector<std::string> notes;
         notes.reserve(chunks.size());
 
-        for (std::size_t i = 0; i < chunks.size(); ++i)
+        for (std::size_t i = 0; i < chunks.size();)
         {
-            notes.push_back(
-                summarizeChunk(
+            try
+            {
+                notes.push_back(summarizeChunk(
                     modelProvider_,
                     sourceKind,
                     userInstruction,
@@ -325,7 +324,23 @@ namespace rose::documents
                     i,
                     chunks.size(),
                     config_.chunkSummaryTokens));
+                ++i;
+            }
+            catch (const std::runtime_error& error)
+            {
+                if (std::string_view{ error.what() }.find(
+                        "exceeded the configured model context size")
+                        == std::string_view::npos
+                    || chunks[i].size() <= 1024u)
+                    throw;
+                const auto smaller = splitChunks(chunks[i],
+                    (std::max)(std::size_t{ 1024u }, chunks[i].size() / 2u));
+                chunks.erase(chunks.begin() + static_cast<std::ptrdiff_t>(i));
+                chunks.insert(chunks.begin() + static_cast<std::ptrdiff_t>(i),
+                    smaller.begin(), smaller.end());
+            }
         }
+        result.chunkCount = chunks.size();
 
         while (notes.size() > 1u)
         {

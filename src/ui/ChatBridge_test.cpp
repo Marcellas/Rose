@@ -65,6 +65,18 @@ int main()
     assert(event->transcriptTurns.size() == 1);
     assert(event->transcriptTurns.front().assistantText == "answer");
 
+    bridge.postEvent({ .type = rose::ui::ChatEventType::AssistantStarted });
+    bridge.postEvent({ .type = rose::ui::ChatEventType::AssistantText, .text = "first " });
+    bridge.postEvent({ .type = rose::ui::ChatEventType::AssistantText, .text = "second" });
+    bridge.postEvent({ .type = rose::ui::ChatEventType::AssistantFinished,
+        .text = "first second" });
+    assert(bridge.tryPopEvent()->type == rose::ui::ChatEventType::AssistantStarted);
+    auto merged = bridge.tryPopEvent();
+    assert(merged && merged->type == rose::ui::ChatEventType::AssistantText
+        && merged->text == "first second");
+    assert(bridge.tryPopEvent()->type == rose::ui::ChatEventType::AssistantFinished);
+    assert(!bridge.tryPopEvent().has_value());
+
     bridge.requestShutdown();
     assert(!bridge.waitForWorkerRequest().has_value());
 

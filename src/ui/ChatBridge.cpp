@@ -110,6 +110,19 @@ namespace rose::ui
             return;
         }
 
+        // Token callbacks can outpace the SDL frame loop. Merge adjacent text
+        // fragments while preserving start/finish and artifact ordering.
+        constexpr std::size_t maximumMergedTextBytes{ 16u * 1024u };
+        if (event.type == ChatEventType::AssistantText
+            && !events_.empty()
+            && events_.back().type == ChatEventType::AssistantText
+            && events_.back().text.size() + event.text.size()
+                <= maximumMergedTextBytes)
+        {
+            events_.back().text += event.text;
+            return;
+        }
+
         events_.push_back(
             std::move(event));
     }

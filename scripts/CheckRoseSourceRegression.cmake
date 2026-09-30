@@ -1610,7 +1610,7 @@ rose_require_source_text(
 
 rose_require_source_text(
     "src/agent/ToolSelectionAgent.cpp"
-    "request.maxGeneratedTokens = 1536"
+    "request.maxGeneratedTokens = requiredPath.empty() ? 1536 : 3072;"
     "focused source-file drafting receives a bounded generation budget")
 
 rose_require_source_text(
@@ -1895,8 +1895,8 @@ message(STATUS "Rose Batch 55 project validation continuation regression contrac
 
 # Batch 56. Large exact PDFs may be accepted up to a 512 MiB safety ceiling,
 # while explicit first-N/range requests stay page-bounded before extraction.
-# Multi-PDF legal/document review preserves a separate page window per named
-# file rather than trying to load and analyze every page of a huge attachment.
+# Multi-PDF review preserves a separate page window per named file. An
+# unbounded page request advances through bounded extraction windows.
 rose_require_source_text(
     "src/tools/ReadFileTool.h"
     "maximumBinarySafetyBytes{ 512u * 1024u * 1024u }"
@@ -1914,8 +1914,13 @@ rose_require_source_text(
 
 rose_require_source_text(
     "src/tools/ReadPdfRegisteredTool.cpp"
-    "not remain resident during later model synthesis"
-    "large PDF backing bytes are released before model synthesis")
+    "pagesPerWindow"
+    "large PDF review advances through bounded extraction windows")
+
+rose_require_source_text(
+    "src/tools/ReadPdfRegisteredTool.cpp"
+    "analysis_windows="
+    "large PDF review reports the number of processed page windows")
 
 rose_require_source_text(
     "src/tools/PdfTextExtractor.cpp"

@@ -3,6 +3,7 @@
 #include <SDL3/SDL.h>
 
 #include <algorithm>
+#include <cstdlib>
 #include <stdexcept>
 #include <string>
 #include <utility>
@@ -561,7 +562,11 @@ namespace rose::ui
                 { "Memory management", RoseUiAction::Memory },
                 { "Integrations / permissions", RoseUiAction::Integrations },
                 { "Outlook mail", RoseUiAction::Email },
-                { "Search online (coming soon)", RoseUiAction::SearchOnline, {}, false },
+                { std::getenv("BRAVE_SEARCH_API_KEY") != nullptr
+                        ? "Search online"
+                        : "Search online (configure key)",
+                    RoseUiAction::SearchOnline, {},
+                    std::getenv("BRAVE_SEARCH_API_KEY") != nullptr },
                 { "Search offline", RoseUiAction::SearchOffline },
                 { "Analyze current screen", RoseUiAction::AnalyzeScreen }
             };

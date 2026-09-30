@@ -18,6 +18,7 @@
 #include "tools/ToolTypes.h"
 
 #include <algorithm>
+#include <cctype>
 #include <chrono>
 #include <exception>
 #include <sstream>
@@ -687,6 +688,49 @@ namespace rose::agent
         }
 
 
+        [[nodiscard]] std::optional<tools::ToolRequest> explicitTimelineMemory(
+            const std::string_view userText)
+        {
+            std::string lower{ userText };
+            std::transform(lower.begin(), lower.end(), lower.begin(),
+                [](const unsigned char c) { return static_cast<char>(std::tolower(c)); });
+            if (lower.find("remember timeline") == std::string::npos
+                && lower.find("remember the timeline") == std::string::npos
+                && lower.find("remember this timeline") == std::string::npos
+                && lower.find("submit facts to memory") == std::string::npos)
+                return std::nullopt;
+
+            std::istringstream lines{ std::string{ userText } };
+            std::string line;
+            std::string timeline =
+                "User-provided timeline (not independently verified):\n";
+            std::size_t entries{ 0 };
+            while (std::getline(lines, line))
+            {
+                const std::size_t first = line.find_first_not_of(" \t\r");
+                if (first == std::string::npos || line[first] != '-') continue;
+                const std::string_view entry{ line.data() + first,
+                    line.size() - first };
+                bool dated{ false };
+                for (std::size_t i = 0; i + 3 < entry.size(); ++i)
+                    if ((entry.substr(i, 2) == "19" || entry.substr(i, 2) == "20")
+                        && std::isdigit(static_cast<unsigned char>(entry[i + 2]))
+                        && std::isdigit(static_cast<unsigned char>(entry[i + 3])))
+                    {
+                        dated = true;
+                        break;
+                    }
+                if (!dated) continue;
+                timeline.append(entry);
+                timeline += '\n';
+                ++entries;
+            }
+            if (entries < 3u) return std::nullopt;
+            return tools::ToolRequest{ .toolId = "remember_memory",
+                .arguments = { { "content", std::move(timeline) } } };
+        }
+
+
         void appendArtifacts(
             std::vector<artifacts::Artifact>& destination,
             std::vector<artifacts::Artifact> source)
@@ -941,6 +985,27 @@ namespace rose::agent
                     state.toolCompletion.
                         authoritativeResponseIfComplete(
                             state.executedToolCount);
+
+                if (state.executedToolCount == 0
+                    && CapabilityRoutingGuard::explicitFilesystemMutationRequest(
+                        state.originalUserText))
+                {
+                    result.authoritativeResponse =
+                        "I couldn't complete that file action. No file tool ran, "
+                        "so I haven't created or changed a file. Please provide "
+                        "the exact destination and the content to use, or retry "
+                        "the request.";
+                }
+
+                if (state.executedToolCount == 0
+                    && CapabilityRoutingGuard::explicitOnlineSearchIntent(
+                        state.originalUserText)
+                    && toolRegistry_.find("search_online") == nullptr)
+                {
+                    result.authoritativeResponse =
+                        "Online search is not configured. Set BRAVE_SEARCH_API_KEY "
+                        "in Rose's environment and restart Rose; I did not search the web.";
+                }
 
                 // Preserve a short user-only continuation only when NO tool has
                 // executed yet and the combined user request still looks tool-backed.
@@ -1464,10 +1529,78 @@ namespace rose::agent
         // step should be. This preserves exact-action confirmation semantics.
         if (explicitlyConfirmedRequest.has_value())
         {
-            const bool continued =
-                executeOne(
-                    *explicitlyConfirmedRequest,
+            if ((explicitlyConfirmedRequest->toolId == "read_named_pdfs"
+                    || explicitlyConfirmedRequest->toolId == "read_pdf")
+                && toolRegistry_.find("remember_memory") != nullptr)
+            {
+                if (const auto memory = explicitTimelineMemory(
+                        state.originalUserText))
+                {
+                    try
+                    {
+                        // This is an independently authorized, auto-allowed
+                        // user statement. Save it before the expensive PDF read
+                        // so a later extraction or context failure cannot lose it.
+                        executeOne(*memory,
+                            permissions::ToolConfirmationState::NotConfirmed);
+                    }
+                    catch (const std::exception& exception)
+                    {
+                        logger_.warning("AgentLoop",
+                            "Explicit timeline memory failed: "
+                            + std::string{ exception.what() });
+                        state.toolCompletion.observe(tools::ToolResult{
+                            .success = false,
+                            .message = "Rose could not save the requested "
+                                "timeline: " + std::string{ exception.what() },
+                            .responseMode =
+                                tools::ToolResponseMode::AuthoritativeCompletion });
+                    }
+                }
+            }
+            bool continued{ false };
+            try
+            {
+                continued = executeOne(*explicitlyConfirmedRequest,
                     permissions::ToolConfirmationState::ExplicitlyConfirmed);
+            }
+            catch (const std::exception& exception)
+            {
+                if (state.executedToolCount > 0
+                    && (explicitlyConfirmedRequest->toolId == "create_text_file"
+                        || explicitlyConfirmedRequest->toolId == "create_directory"
+                        || explicitlyConfirmedRequest->toolId
+                            == "create_directory_with_text_file"))
+                {
+                    // Earlier confirmed steps have already changed the disk.
+                    // Report their exact successes plus this failure instead of
+                    // discarding the run's progress behind a generic RunFailed.
+                    state.toolCompletion.observe(tools::ToolResult{
+                        .success = false,
+                        .message = "Could not complete "
+                            + explicitlyConfirmedRequest->toolId + ": "
+                            + exception.what()
+                            + ". Earlier completed actions remain in place.",
+                        .responseMode =
+                            tools::ToolResponseMode::AuthoritativeCompletion,
+                        .artifacts = {} });
+                    appendTransientContext(state.transientContext,
+                        CapabilityRoutingGuard::buildExecutionEvidenceGuard(
+                            state.executedToolCount));
+                    return finishReady();
+                }
+                if (explicitlyConfirmedRequest->toolId != "read_named_pdfs"
+                    && explicitlyConfirmedRequest->toolId != "read_pdf")
+                    throw;
+                state.toolCompletion.observe(tools::ToolResult{
+                    .success = false,
+                    .message = "PDF review failed: "
+                        + std::string{ exception.what() }
+                        + ". Other completed actions remain recorded.",
+                    .responseMode =
+                        tools::ToolResponseMode::AuthoritativeCompletion });
+                return finishReady();
+            }
 
             if (!continued)
             {

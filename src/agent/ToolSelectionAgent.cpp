@@ -11,6 +11,7 @@
 #include "tools/ToolRegistry.h"
 
 #include <algorithm>
+#include <regex>
 #include <exception>
 #include <cctype>
 #include <sstream>
@@ -725,6 +726,168 @@ namespace rose::agent
 
 
         [[nodiscard]]
+        bool namedSourceFile(const std::string_view name)
+        {
+            const std::string lower = lowerCopy(name);
+            static constexpr std::string_view extensions[]{
+                ".cpp", ".cxx", ".cc", ".c", ".h", ".hpp",
+                ".py", ".txt", ".md"
+            };
+            for (const auto extension : extensions)
+            {
+                if (lower.ends_with(extension) && lower.size() > extension.size())
+                    return true;
+            }
+            return false;
+        }
+
+
+        [[nodiscard]]
+        std::optional<std::string> explicitlyNamedNewDirectory(
+            const std::string_view currentUserText,
+            const std::string_view priorUserTaskContext)
+        {
+            const std::string current = lowerCopy(currentUserText);
+            if (current.find("do not create") != std::string::npos
+                || current.find("don't create") != std::string::npos
+                || current.find("without creating") != std::string::npos
+                || current.find("never mind") != std::string::npos
+                || current.find("nevermind") != std::string::npos)
+                return std::nullopt;
+
+            const std::string authority = combinedUserAuthorityText(
+                currentUserText, priorUserTaskContext);
+            static const std::regex cue{
+                R"rose(\b(?:create|make)\s+(?:a\s+|a\s+new\s+|new\s+)?(?:directory|folder)(?:\s+at)?\s+"([^"\r\n]+)")rose",
+                std::regex::icase };
+            std::smatch match;
+            if (!std::regex_search(authority, match, cue) || match.size() < 2u)
+                return std::nullopt;
+            const std::string path = match[1].str();
+            const std::size_t separator = path.find_last_of("\\/");
+            if (!looksLikeAbsoluteWindowsPath(path)
+                || separator == std::string::npos
+                || separator + 1u == path.size()
+                || namedSourceFile(std::string_view{ path }.substr(separator + 1u)))
+                return std::nullopt;
+            return path;
+        }
+
+
+        [[nodiscard]]
+        bool completedPathInObservations(
+            const std::string_view context,
+            const std::string_view toolId,
+            const std::string_view argument,
+            const std::string_view path)
+        {
+            constexpr std::string_view open{ "<rose_tool_observation>" };
+            constexpr std::string_view close{ "</rose_tool_observation>" };
+            const std::string header = "tool_id=" + std::string{ toolId }
+                + "\nsuccess=true\n";
+            const std::string exactArgument = "argument_name="
+                + std::string{ argument }
+                + "\nargument_value_begin\n"
+                + std::string{ path }
+                + "\nargument_value_end\n";
+            std::size_t start = context.find(open);
+            while (start != std::string_view::npos)
+            {
+                const std::size_t end = context.find(close, start + open.size());
+                if (end == std::string_view::npos) break;
+                const std::string normalized = normalizedPathEvidenceText(
+                    context.substr(start, end - start));
+                if (normalized.find(normalizedPathEvidenceText(header)) != std::string::npos
+                    && normalized.find(normalizedPathEvidenceText(exactArgument)) != std::string::npos)
+                    return true;
+                start = context.find(open, end + close.size());
+            }
+            return false;
+        }
+
+
+        [[nodiscard]]
+        std::vector<std::string> requestedFilesInNewDirectory(
+            const std::string_view userText,
+            const std::string_view priorUserTaskContext,
+            const std::string_view directory)
+        {
+            const std::string authority = combinedUserAuthorityText(
+                userText, priorUserTaskContext);
+            struct Candidate { std::size_t position; std::string path; };
+            std::vector<Candidate> candidates;
+            std::string destinationDirectory{ directory };
+            while (destinationDirectory.size() > 3u
+                && (destinationDirectory.back() == '\\'
+                    || destinationDirectory.back() == '/'))
+                destinationDirectory.pop_back();
+            const std::string normalizedDirectory =
+                normalizedPathEvidenceText(destinationDirectory);
+
+            // Absolute paths have to name this exact requested directory. A
+            // conflicting path elsewhere never authorizes a new parent folder.
+            for (std::size_t opening = authority.find('"');
+                opening != std::string::npos;
+                opening = authority.find('"', opening + 1u))
+            {
+                const std::size_t closing = authority.find('"', opening + 1u);
+                if (closing == std::string::npos) break;
+                const std::string quoted = authority.substr(
+                    opening + 1u, closing - opening - 1u);
+                const std::size_t slash = quoted.find_last_of("\\/");
+                if (looksLikeAbsoluteWindowsPath(quoted)
+                    && slash != std::string::npos
+                    && namedSourceFile(std::string_view{ quoted }.substr(slash + 1u))
+                    && normalizedPathEvidenceText(quoted.substr(0, slash))
+                        == normalizedDirectory)
+                    candidates.push_back({ opening, quoted });
+                opening = closing;
+            }
+
+            static const std::regex filename{
+                R"(\b[A-Za-z_][A-Za-z0-9_-]*\.(?:cpp|cxx|cc|c|h|hpp|py|txt|md)\b)",
+                std::regex::icase };
+            for (std::sregex_iterator it{ authority.begin(), authority.end(), filename },
+                end; it != end; ++it)
+            {
+                const std::size_t position = static_cast<std::size_t>(it->position());
+                // The basename of an absolute or relative path is handled by
+                // that path, not silently redirected to the new directory.
+                if (position > 0u
+                    && (authority[position - 1u] == '\\'
+                        || authority[position - 1u] == '/'))
+                    continue;
+                candidates.push_back({ position, destinationDirectory
+                    + "\\" + it->str() });
+            }
+
+            const std::string lower = lowerCopy(authority);
+            const std::size_t math = lower.find("math file");
+            if (math != std::string::npos
+                && lower.find("math.h") == std::string::npos)
+                candidates.push_back({ math, destinationDirectory + "\\Math.h" });
+
+            std::stable_sort(candidates.begin(), candidates.end(),
+                [](const Candidate& a, const Candidate& b) {
+                    return a.position < b.position;
+                });
+            std::vector<std::string> paths;
+            for (const auto& candidate : candidates)
+            {
+                const auto duplicate = std::find_if(paths.begin(), paths.end(),
+                    [&](const std::string& existing) {
+                        return normalizedPathEvidenceText(existing)
+                            == normalizedPathEvidenceText(candidate.path);
+                    });
+                if (duplicate == paths.end()) paths.push_back(candidate.path);
+            }
+            return paths;
+        }
+
+
+
+
+        [[nodiscard]]
         bool userAuthorityContainsExactPath(
             const std::string_view authority,
             const std::string_view normalizedPath)
@@ -1133,6 +1296,85 @@ namespace rose::agent
         {
             return {};
         }
+        if (agentContext.find("tool_id=search_online") != std::string_view::npos)
+        {
+            // A search result needs final synthesis, not another paid query.
+            return {};
+        }
+
+        // A named new directory is a prerequisite for all files inside it.
+        // Drive multi-file creation from executed observations, never a claimed
+        // model result. The existing combined tool still handles one-child work.
+        std::string nextBatchFile;
+        if (const auto directory = explicitlyNamedNewDirectory(
+                userText, priorUserTaskContext))
+        {
+            const auto paths = requestedFilesInNewDirectory(
+                userText, priorUserTaskContext, *directory);
+            const bool combinedSingleFile = paths.size() == 1u
+                && toolRegistry_.find("create_directory_with_text_file") != nullptr;
+            if (!combinedSingleFile)
+            {
+                const bool folderCreated = completedPathInObservations(
+                    agentContext, "create_directory", "path", *directory)
+                    || completedPathInObservations(agentContext,
+                        "create_directory_with_text_file", "directory_path", *directory);
+                if (!folderCreated)
+                {
+                    if (toolRegistry_.find("create_directory") == nullptr)
+                        return {};
+                    return AgentDecision{
+                        .action = AgentAction::InvokeTool,
+                        .toolRequest = tools::ToolRequest{
+                            .toolId = "create_directory",
+                            .arguments = { { "path", *directory } }
+                        },
+                        .codingTaskPlan = std::nullopt,
+                        .rawModelOutput = {}
+                    };
+                }
+
+                for (const std::string& path : paths)
+                {
+                    if (!completedPathInObservations(agentContext,
+                            "create_text_file", "path", path)
+                        && !completedPathInObservations(agentContext,
+                            "create_directory_with_text_file", "path", path))
+                    {
+                        nextBatchFile = path;
+                        break;
+                    }
+                }
+                if (nextBatchFile.empty())
+                    return {};
+            }
+        }
+
+
+        if (auto folder = CapabilityRoutingGuard::explicitNewFolderAndFileRequest(
+                userText, toolRegistry_))
+        {
+            return AgentDecision{
+                .action = AgentAction::InvokeTool,
+                .toolRequest = std::move(*folder),
+                .codingTaskPlan = std::nullopt,
+                .rawModelOutput = {}
+            };
+        }
+
+        if (agentContext.find("tool_id=search_online") == std::string_view::npos)
+        {
+            if (auto search = CapabilityRoutingGuard::explicitOnlineSearchRequest(
+                    userText, toolRegistry_))
+            {
+                return AgentDecision{
+                    .action = AgentAction::InvokeTool,
+                    .toolRequest = std::move(*search),
+                    .codingTaskPlan = std::nullopt,
+                    .rawModelOutput = {}
+                };
+            }
+        }
 
         // This narrow instruction has an exact user-supplied root and literal
         // query. Keep it out of model routing, which can substitute a plausible
@@ -1354,8 +1596,17 @@ namespace rose::agent
                 decision =
                     recoverTextCreationDecision(
                         userText,
-                        priorUserTaskContext);
+                        priorUserTaskContext,
+                        nextBatchFile);
             }
+
+            // Do not let a broad routing pass substitute another file when
+            // the focused draft could not produce this exact destination.
+            if (!nextBatchFile.empty()
+                && (decision.action != AgentAction::InvokeTool
+                    || !decision.toolRequest.has_value()
+                    || decision.toolRequest->toolId != "create_text_file"))
+                return {};
 
             if (
                 decision.action != AgentAction::InvokeTool
@@ -1388,6 +1639,33 @@ namespace rose::agent
                     recoverTextCreationDecision(
                         userText,
                         priorUserTaskContext);
+            }
+
+            // Sending a query to a third party is an externally consequential
+            // action. Do not let model output or tool evidence invent its terms.
+            if (decision.action == AgentAction::InvokeTool
+                && decision.toolRequest.has_value()
+                && decision.toolRequest->toolId == "search_online")
+            {
+                const std::string lower = lowerCopy(userText);
+                const bool webIntent = lower.find("online") != std::string::npos
+                    || lower.find("web") != std::string::npos
+                    || lower.find("internet") != std::string::npos
+                    || lower.find("latest") != std::string::npos
+                    || lower.find("today") != std::string::npos
+                    || lower.find("current") != std::string::npos;
+                if (!webIntent || userText.size() > 300
+                    || userText.find_first_of("\r\n") != std::string_view::npos)
+                {
+                    decision.action = AgentAction::RespondNormally;
+                    decision.toolRequest.reset();
+                }
+                else
+                {
+                    decision.toolRequest->arguments = {
+                        { "query", std::string{ userText } }
+                    };
+                }
             }
 
             // Coding plans are model-produced review artifacts, never execution
@@ -2281,7 +2559,8 @@ namespace rose::agent
 
     AgentDecision ToolSelectionAgent::recoverTextCreationDecision(
         const std::string_view userText,
-        const std::string_view priorUserTaskContext) const
+        const std::string_view priorUserTaskContext,
+        const std::string_view requiredPath) const
     {
         if (
             !userExpressedTextCreationIntent(
@@ -2317,6 +2596,15 @@ namespace rose::agent
                     "/no_think"
             });
 
+        if (!requiredPath.empty())
+        {
+            request.messages.front().content +=
+                "\nFor this batch, draft ONLY the following still-missing file. "
+                "Return this exact PATH and complete, useful content for this file; "
+                "do not repeat another file or invent a destination:\nPATH="
+                + std::string{ requiredPath } + "\n";
+        }
+
         std::string userMessage;
         if (!priorUserTaskContext.empty())
         {
@@ -2343,7 +2631,7 @@ namespace rose::agent
                 .content = std::move(userMessage)
             });
 
-        request.maxGeneratedTokens = 1536;
+        request.maxGeneratedTokens = requiredPath.empty() ? 1536 : 3072;
         request.sampling.temperature = 0.10f;
         request.sampling.topK = 20;
         request.sampling.topP = 0.90f;
@@ -2363,6 +2651,10 @@ namespace rose::agent
                     parseFocusedTextCreationDraft(response.text);
                 draft.has_value())
             {
+                if (!requiredPath.empty()
+                    && normalizedPathEvidenceText(draft->arguments.at("path"))
+                        != normalizedPathEvidenceText(requiredPath))
+                    return {};
                 AgentDecision recovered;
                 recovered.action = AgentAction::InvokeTool;
                 recovered.toolRequest = *draft;
@@ -2379,7 +2671,13 @@ namespace rose::agent
             if (
                 recovered.action != AgentAction::InvokeTool
                 || !recovered.toolRequest.has_value()
-                || recovered.toolRequest->toolId != "create_text_file")
+                || recovered.toolRequest->toolId != "create_text_file"
+                || (!requiredPath.empty()
+                    && (recovered.toolRequest->arguments.find("path")
+                            == recovered.toolRequest->arguments.end()
+                        || normalizedPathEvidenceText(
+                            recovered.toolRequest->arguments.at("path"))
+                            != normalizedPathEvidenceText(requiredPath))))
             {
                 return {};
             }

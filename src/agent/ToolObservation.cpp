@@ -54,6 +54,18 @@ namespace rose::agent
 
         for (const auto& [name, value] : arguments)
         {
+            // The original user request is already supplied independently to
+            // the final response. Repeating a multi-page instruction in this
+            // tool observation once per read can overflow that response context.
+            if (name == "instruction"
+                && (request.toolId == "read_pdf"
+                    || request.toolId == "read_named_pdfs"))
+                continue;
+            if (name == "content"
+                && (request.toolId == "remember_memory"
+                    || request.toolId == "create_text_file"
+                    || request.toolId == "create_directory_with_text_file"))
+                continue;
             text
                 << "argument_name="
                 << name

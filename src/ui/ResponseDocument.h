@@ -37,6 +37,7 @@ namespace rose::ui
         CodeBlock,
         DisplayMath,
         ListItem,
+        Table,
         Separator
     };
 
@@ -59,6 +60,10 @@ namespace rose::ui
 
         std::string text;
         std::string language;
+
+        // Table rows include the header at index zero. The parser bounds rows
+        // and columns so model output cannot allocate an unbounded cell grid.
+        std::vector<std::vector<std::string>> tableRows;
 
         int headingLevel{ 0 };
         int orderedIndex{ 0 };

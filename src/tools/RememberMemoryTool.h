@@ -3,6 +3,8 @@
 #include "memory/MemoryRepository.h"
 #include "tools/ITool.h"
 
+namespace rose::persistence { class IConversationStore; }
+
 namespace rose::tools
 {
 
@@ -14,7 +16,8 @@ namespace rose::tools
     {
     public:
         explicit RememberMemoryTool(
-            memory::MemoryRepository& repository);
+            memory::MemoryRepository& repository,
+            persistence::IConversationStore* conversationStore = nullptr);
 
         [[nodiscard]]
         const ToolDescriptor& descriptor() const noexcept override;
@@ -25,6 +28,7 @@ namespace rose::tools
 
     private:
         memory::MemoryRepository& repository_;
+        persistence::IConversationStore* conversationStore_;
         ToolDescriptor descriptor_;
     };
 

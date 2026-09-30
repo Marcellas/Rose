@@ -831,6 +831,27 @@ int main()
     }
 
     {
+        SequencedResponseModelProvider provider{
+            { "ACTION=TOOL\nTOOL=read_pdf\nARG path=C:\\Legal\\A.pdf\nEND\n" }
+        };
+        rose::tools::ToolRegistry registry;
+        registry.registerTool(std::make_unique<PathDummyTool>("read_pdf"));
+        registry.registerTool(std::make_unique<PathDummyTool>("read_named_pdfs"));
+        rose::logging::Logger logger{
+            rose::logging::LoggerConfig{ .mode = rose::logging::LogMode::Silent }
+        };
+        rose::agent::ToolSelectionAgent agent{ provider, registry, logger };
+        const auto decision = agent.decide(
+            R"(Read all six files "C:\Legal\A.pdf", "C:\Legal\B.pdf", "C:\Legal\C.pdf", "C:\Legal\D.pdf", "C:\Legal\E.pdf", "C:\Legal\F.pdf".)");
+        require(decision.action == AgentAction::InvokeTool
+            && decision.toolRequest.has_value()
+            && decision.toolRequest->toolId == "read_named_pdfs"
+            && decision.toolRequest->arguments.at("path6") == R"(C:\Legal\F.pdf)"
+            && provider.generationCount() == 0,
+            "six named files must bypass a model-selected single PDF read");
+    }
+
+    {
         const auto decision =
             decide(
                 "ACTION=TOOL\n"
@@ -2855,6 +2876,96 @@ int main()
         require(
             decision.action == AgentAction::RespondNormally,
             "current user cancellation must override retained source-creation intent");
+    }
+
+    {
+        // The original bug proposed main.cpp first, then failed because the
+        // requested Utility folder had not yet been created. Each subsequent
+        // decision must advance to a still-missing file after confirmation.
+        const std::string directory =
+            "C:\\Users\\chris\\OneDrive\\Desktop\\Utility";
+        const std::string request =
+            "Create directory \"" + directory + "\" then Create \""
+            + directory + "\\main.cpp\". Provide definitions to \""
+            "C:\\Users\\chris\\OneDrive\\Desktop\\Utilities\\Application.h\". "
+            "In \"" + directory + "\\Application.h\" define loops. "
+            "Create a math file in the same directory, and SDL_Window.h "
+            "and SDL_Window.cpp in the same directory.";
+        const std::vector<std::string> expected{
+            directory + "\\main.cpp",
+            directory + "\\Application.h",
+            directory + "\\Math.h",
+            directory + "\\SDL_Window.h",
+            directory + "\\SDL_Window.cpp"
+        };
+        std::vector<std::string> drafts;
+        for (const std::string& path : expected)
+            drafts.push_back("PATH=" + path
+                + "\nCONTENT_BEGIN\n// Created in requested order.\nCONTENT_END\n");
+
+        SequencedResponseModelProvider provider{ std::move(drafts) };
+        rose::tools::ToolRegistry registry;
+        registry.registerTool(std::make_unique<PathDummyTool>("create_directory"));
+        registry.registerTool(std::make_unique<TextMutationDummyTool>("create_text_file"));
+        registry.registerTool(std::make_unique<TextMutationDummyTool>(
+            "create_directory_with_text_file"));
+        rose::logging::Logger logger{
+            rose::logging::LoggerConfig{ .mode = rose::logging::LogMode::Silent }
+        };
+        rose::agent::ToolSelectionAgent agent{ provider, registry, logger };
+        std::string context;
+        const auto folder = agent.decide(request, context);
+        require(folder.toolRequest.has_value()
+                && folder.toolRequest->toolId == "create_directory"
+                && folder.toolRequest->arguments.at("path") == directory
+                && provider.generationCount() == 0,
+            "multi-file folder request must create its directory before drafting any child");
+
+        const auto completed = [&](const std::string_view toolId,
+            const std::string_view path) {
+            context += "\n<rose_tool_observation>\n"
+                "tool_id=" + std::string{ toolId }
+                + "\nsuccess=true\nargument_name=path\nargument_value_begin\n"
+                + std::string{ path } + "\nargument_value_end\n"
+                "</rose_tool_observation>\n";
+        };
+        completed("create_directory", directory);
+        for (std::size_t i = 0; i < expected.size(); ++i)
+        {
+            const auto file = agent.decide(request, context);
+            require(file.toolRequest.has_value()
+                    && file.toolRequest->toolId == "create_text_file"
+                    && file.toolRequest->arguments.at("path") == expected[i]
+                    && provider.generationCount() == i + 1u,
+                "folder batch must draft the next missing requested child file");
+            completed("create_text_file", expected[i]);
+        }
+        const auto finished = agent.decide(request, context);
+        require(!finished.toolRequest.has_value()
+                && provider.generationCount() == expected.size(),
+            "completed folder batch must not repeat files or run another draft");
+    }
+
+    {
+        FixedResponseModelProvider provider{
+            "PATH=C:\\RoseBatch\\Application.h\n"
+            "CONTENT_BEGIN\n// Wrong next file\nCONTENT_END\n"
+        };
+        rose::tools::ToolRegistry registry;
+        registry.registerTool(std::make_unique<PathDummyTool>("create_directory"));
+        registry.registerTool(std::make_unique<TextMutationDummyTool>("create_text_file"));
+        rose::logging::Logger logger{
+            rose::logging::LoggerConfig{ .mode = rose::logging::LogMode::Silent }
+        };
+        rose::agent::ToolSelectionAgent agent{ provider, registry, logger };
+        const auto decision = agent.decide(
+            "Create directory \"C:\\RoseBatch\" then create \""
+            "C:\\RoseBatch\\main.cpp\" and \"C:\\RoseBatch\\Application.h\".",
+            "<rose_tool_observation>\ntool_id=create_directory\nsuccess=true\n"
+            "argument_name=path\nargument_value_begin\nC:\\RoseBatch\n"
+            "argument_value_end\n</rose_tool_observation>");
+        require(!decision.toolRequest.has_value(),
+            "a batch draft cannot substitute a later file for the exact next target");
     }
 
     std::cout

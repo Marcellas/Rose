@@ -373,6 +373,56 @@ namespace rose::ui
         }
 
 
+        [[nodiscard]]
+        std::vector<std::string> tableCells(std::string_view line)
+        {
+            line = trimView(line);
+            if (!line.empty() && line.front() == '|') line.remove_prefix(1);
+            if (!line.empty() && line.back() == '|') line.remove_suffix(1);
+
+            std::vector<std::string> cells;
+            std::string cell;
+            for (std::size_t index = 0; index < line.size(); ++index)
+            {
+                if (line[index] == '\\' && index + 1 < line.size()
+                    && line[index + 1] == '|')
+                {
+                    cell.push_back('|');
+                    ++index;
+                }
+                else if (line[index] == '|')
+                {
+                    cells.emplace_back(trimView(cell));
+                    cell.clear();
+                }
+                else
+                {
+                    cell.push_back(line[index]);
+                }
+            }
+            cells.emplace_back(trimView(cell));
+            return cells;
+        }
+
+
+        [[nodiscard]]
+        bool isTableRule(const std::string_view line,
+                         const std::size_t columns)
+        {
+            if (line.find('|') == std::string_view::npos) return false;
+            const auto cells = tableCells(line);
+            if (cells.size() != columns) return false;
+            for (std::string_view cell : cells)
+            {
+                if (!cell.empty() && cell.front() == ':') cell.remove_prefix(1);
+                if (!cell.empty() && cell.back() == ':') cell.remove_suffix(1);
+                if (cell.size() < 3 || cell.find_first_not_of('-')
+                    != std::string_view::npos) return false;
+            }
+            return true;
+        }
+
+
         struct ListPrefix
         {
             bool matched{ false };
@@ -681,6 +731,45 @@ namespace rose::ui
                 continue;
             }
 
+
+            // A header followed by a Markdown separator introduces a table.
+            // Bound the layout grid; any remaining rows resume normal parsing.
+            if (trimmed.find('|') != std::string_view::npos && hasNewline)
+            {
+                const auto headers = tableCells(trimmed);
+                const std::size_t ruleBegin = newline + 1;
+                const std::size_t ruleEnd = source.find('\n', ruleBegin);
+                const std::string_view rule = source.substr(
+                    ruleBegin, ruleEnd == std::string_view::npos
+                        ? source.size() - ruleBegin : ruleEnd - ruleBegin);
+                if (headers.size() >= 2 && headers.size() <= 8
+                    && isTableRule(rule, headers.size()))
+                {
+                    appendParagraph(document, paragraph);
+                    ResponseBlock table;
+                    table.kind = ResponseBlockKind::Table;
+                    table.tableRows.push_back(headers);
+                    std::size_t rowBegin = ruleEnd == std::string_view::npos
+                        ? source.size() : ruleEnd + 1;
+                    while (rowBegin < source.size()
+                        && table.tableRows.size() < 64)
+                    {
+                        const std::size_t rowEnd = source.find('\n', rowBegin);
+                        const std::string_view row = source.substr(
+                            rowBegin, rowEnd == std::string_view::npos
+                                ? source.size() - rowBegin : rowEnd - rowBegin);
+                        if (row.find('|') == std::string_view::npos) break;
+                        auto cells = tableCells(row);
+                        if (cells.size() != headers.size()) break;
+                        table.tableRows.push_back(std::move(cells));
+                        rowBegin = rowEnd == std::string_view::npos
+                            ? source.size() : rowEnd + 1;
+                    }
+                    document.blocks.push_back(std::move(table));
+                    lineBegin = rowBegin;
+                    continue;
+                }
+            }
 
             std::string_view fence;
             std::string_view fenceInfo;

@@ -33,6 +33,7 @@
 #include "integrations/IntegrationPermissionRepository.h"
 #include "integrations/OutlookCommand.h"
 #include "integrations/OutlookIntegrationWorker.h"
+#include "integrations/WinHttpClient.h"
 #include "integrations/WindowsCredentialVault.h"
 #include "jobs/ErrandCommand.h"
 #include "jobs/PersistentJobScheduler.h"
@@ -79,6 +80,7 @@
 #include "tools/RecyclePathTool.h"
 #include "tools/ScanDirectoryTreeTool.h"
 #include "tools/SearchLocalFilesTool.h"
+#include "tools/SearchOnlineTool.h"
 #include "tools/ReadFileTool.h"
 #include "tools/ReadTextFileRegisteredTool.h"
 #include "tools/ReadPdfRegisteredTool.h"
@@ -111,7 +113,9 @@
 
 #include <algorithm>
 #include <atomic>
+#include <charconv>
 #include <chrono>
+#include <cstdlib>
 #include <cstdint>
 #include <exception>
 #include <filesystem>
@@ -122,6 +126,7 @@
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <system_error>
 #include <thread>
 #include <utility>
 #include <variant>
@@ -130,6 +135,37 @@
 
 namespace
 {
+    [[nodiscard]] std::uint32_t configuredTextContextSize()
+    {
+        constexpr std::uint32_t defaultContextTokens{ 16384u };
+        std::string setting;
+#ifdef _WIN32
+        char* rawSetting{ nullptr };
+        std::size_t settingBytes{ 0 };
+        if (_dupenv_s(&rawSetting, &settingBytes,
+                "ROSE_TEXT_CONTEXT_TOKENS") != 0)
+            throw std::runtime_error{
+                "Could not read ROSE_TEXT_CONTEXT_TOKENS." };
+        const std::unique_ptr<char, decltype(&std::free)> ownedSetting{
+            rawSetting, &std::free };
+        if (ownedSetting) setting = ownedSetting.get();
+#else
+        if (const char* rawSetting = std::getenv("ROSE_TEXT_CONTEXT_TOKENS"))
+            setting = rawSetting;
+#endif
+        if (setting.empty()) return defaultContextTokens;
+
+        int tokens{ 0 };
+        const std::string_view value{ setting };
+        const auto [end, error] = std::from_chars(
+            value.data(), value.data() + value.size(), tokens);
+        if (error != std::errc{} || end != value.data() + value.size()
+            || tokens < 8192 || tokens > 40960)
+            throw std::invalid_argument{
+                "ROSE_TEXT_CONTEXT_TOKENS must be an integer from 8192 to 40960." };
+        return static_cast<std::uint32_t>(tokens);
+    }
+
     [[nodiscard]]
     std::string_view trimAsciiWhitespace(
         const std::string_view text) noexcept
@@ -591,7 +627,7 @@ int main()
                             "models/Qwen3-8B-Q4_K_M.gguf",
 
                         .contextSize =
-                            8192,
+                            configuredTextContextSize(),
 
                         // 999 means "offload every layer llama.cpp can offload".
                         .gpuLayers =
@@ -1085,6 +1121,7 @@ int main()
                     rose::documents::LocalPdfDocumentMutationService pdfMutationService;
                     rose::shortcuts::LocalShortcutService shortcutService;
                     rose::process::LocalProcessService processService;
+                    rose::integrations::WinHttpClient searchHttpClient;
 
                     toolRegistry.registerTool(
                         std::make_unique<
@@ -1170,7 +1207,8 @@ int main()
                     toolRegistry.registerTool(
                         std::make_unique<
                             rose::tools::RememberMemoryTool>(
-                                memoryRepository));
+                                memoryRepository,
+                                &conversationStore));
 
                     // Read-only filesystem discovery is intentionally still
                     // confirmation-gated. list_directory reveals only one level;
@@ -1190,6 +1228,17 @@ int main()
                     toolRegistry.registerTool(
                         std::make_unique<
                             rose::tools::SearchLocalFilesTool>());
+
+                    // An online query leaves the machine, so the execution policy
+                    // requires confirmation of the exact query. No key is stored in
+                    // Rose's data files or sent to the local language model.
+                    if (const char* key = std::getenv("BRAVE_SEARCH_API_KEY");
+                        key != nullptr && *key != '\0')
+                    {
+                        toolRegistry.registerTool(
+                            std::make_unique<rose::tools::SearchOnlineTool>(
+                                searchHttpClient, key));
+                    }
 
                     // ZIP lifecycle: inspect is read-only; extract/create are
                     // local writes and therefore confirmation-gated. All three
@@ -1225,7 +1274,7 @@ int main()
                     toolRegistry.registerTool(std::move(pdfReader));
                     toolRegistry.registerTool(
                         std::make_unique<rose::tools::ReadNamedPdfsTool>(
-                            pdfReaderRef));
+                            pdfReaderRef, agentModelProvider));
 
                     toolRegistry.registerTool(
                         std::make_unique<
@@ -3297,11 +3346,14 @@ int main()
                                     };
                                 }
 
-                                const rose::memory::RememberMemoryResult result =
-                                    memoryRepository.remember(
-                                        content,
-                                        rose::memory::MemoryKind::ExplicitUser,
-                                        "explicit-slash-command");
+                                const rose::tools::ToolResult result =
+                                    toolRegistry.execute(
+                                        rose::tools::ToolRequest{
+                                            .toolId = "remember_memory",
+                                            .arguments = {
+                                                { "content", std::string{ content } }
+                                            }
+                                        });
 
                                 chatBridge.postEvent(
                                     rose::ui::ChatEvent{
@@ -3315,10 +3367,7 @@ int main()
                                         .type =
                                             rose::ui::ChatEventType::
                                             AssistantFinished,
-                                        .text =
-                                            result.created
-                                                ? "Saved that to Rose's local long-term memory."
-                                                : "That is already in Rose's local long-term memory."
+                                        .text = result.message
                                     });
                             }
                             catch (const std::exception& exception)
@@ -4554,6 +4603,11 @@ int main()
                         "Search offline for \"<terms>\" in \"<absolute folder>\"");
                     break;
 
+                case Action::SearchOnline:
+                    showChat();
+                    chatWindow.setDraftText("Search online for ");
+                    break;
+
                 case Action::AnalyzeScreen:
                     chatWindow.stageScreenCapture();
                     showChat();
@@ -4597,7 +4651,6 @@ int main()
                 // lets those systems plug in without growing SdlAvatar into a
                 // desktop-assistant god object.
                 case Action::RecentChats:
-                case Action::SearchOnline:
                 case Action::Settings:
                 case Action::None:
                     break;
@@ -4625,9 +4678,11 @@ int main()
             synchronizeWorkspaceMenu();
 
             SDL_Event event{};
-
-            while (SDL_PollEvent(
-                &event))
+            const std::uint64_t eventPumpStarted = SDL_GetTicks();
+            // Leave one update/render cycle between bursts of queued input.
+            for (int processed = 0;
+                 processed < 64 && SDL_PollEvent(&event);
+                 ++processed)
             {
                 if (event.type == SDL_EVENT_QUIT)
                 {
@@ -4687,6 +4742,10 @@ int main()
                     }
                 }
             }
+            const std::uint64_t eventPumpMillis = SDL_GetTicks() - eventPumpStarted;
+            if (eventPumpMillis >= 100)
+                std::cerr << "[Rose UI slow] SDL event pump: "
+                    << eventPumpMillis << " ms\n";
 
             // Keep worker->UI events accumulated even while the chat is hidden.
             chatWindow.update();

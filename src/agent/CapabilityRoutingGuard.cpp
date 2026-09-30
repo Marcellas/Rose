@@ -3,6 +3,7 @@
 #include "files/FileFormatCatalog.h"
 
 #include "tools/ToolRegistry.h"
+#include "tools/ReadNamedPdfsTool.h"
 #include "tools/ToolTypes.h"
 
 #include <algorithm>
@@ -10,6 +11,7 @@
 #include <charconv>
 #include <initializer_list>
 #include <filesystem>
+#include <regex>
 #include <sstream>
 #include <string>
 #include <string_view>
@@ -1787,6 +1789,130 @@ namespace rose::agent
     }
 
 
+    bool CapabilityRoutingGuard::explicitOnlineSearchIntent(
+        const std::string_view userText)
+    {
+        const std::string lower = asciiLower(userText);
+        static constexpr std::string_view prefixes[]{
+            "search online for ", "search the web for ", "look up online ",
+            "browse for ", "find online ", "research online "
+        };
+        for (const std::string_view prefix : prefixes)
+            if (lower.starts_with(prefix)) return true;
+        return false;
+    }
+
+
+    std::optional<tools::ToolRequest>
+    CapabilityRoutingGuard::explicitOnlineSearchRequest(
+        const std::string_view userText,
+        const tools::ToolRegistry& toolRegistry)
+    {
+        if (!toolRegistered(toolRegistry, "search_online")) return std::nullopt;
+        const std::string lower = asciiLower(userText);
+        static constexpr std::string_view prefixes[]{
+            "search online for ", "search the web for ", "look up online ",
+            "browse for ", "find online ", "research online "
+        };
+        for (const std::string_view prefix : prefixes)
+        {
+            if (!lower.starts_with(prefix)) continue;
+            std::string query{ userText.substr(prefix.size()) };
+            const auto first = query.find_first_not_of(" \t");
+            if (first == std::string::npos) return std::nullopt;
+            const auto last = query.find_last_not_of(" \t");
+            query = query.substr(first, last - first + 1);
+            if (query.size() >= 2 && query.front() == '"' && query.back() == '"')
+                query = query.substr(1, query.size() - 2);
+            if (query.empty() || query.size() > 300
+                || query.find_first_of("\r\n") != std::string::npos)
+                return std::nullopt;
+            return tools::ToolRequest{
+                .toolId = "search_online", .arguments = { { "query", query } }
+            };
+        }
+        return std::nullopt;
+    }
+
+
+    std::optional<tools::ToolRequest>
+    CapabilityRoutingGuard::explicitNewFolderAndFileRequest(
+        const std::string_view userText,
+        const tools::ToolRegistry& toolRegistry)
+    {
+        if (!toolRegistered(toolRegistry, "create_directory_with_text_file"))
+            return std::nullopt;
+        const std::string lower = asciiLower(userText);
+        if ((!lower.starts_with("create ") && !lower.starts_with("make "))
+            || (!containsAsciiWord(lower, "directory") && !containsAsciiWord(lower, "folder"))
+            || lower.find("inside create") == std::string::npos
+            || (lower.find("shell file") == std::string::npos
+                && lower.find("empty file") == std::string::npos
+                && lower.find("blank file") == std::string::npos))
+            return std::nullopt;
+
+        const auto parent = extractAbsoluteWindowsPath(userText);
+        if (!parent) return std::nullopt;
+
+        const std::size_t named = lower.find("name it ");
+        if (named == std::string::npos) return std::nullopt;
+        const std::size_t opening = userText.find('"', named + 8);
+        const std::size_t closing = opening == std::string_view::npos
+            ? opening : userText.find('"', opening + 1);
+        if (closing == std::string_view::npos) return std::nullopt;
+        const std::string folder{ userText.substr(opening + 1, closing - opening - 1) };
+        if (folder.empty() || folder == "." || folder == ".."
+            || folder.find_first_of("\\/:*?\"<>|") != std::string::npos)
+            return std::nullopt;
+
+        const std::size_t inside = lower.find("inside create", closing);
+        if (inside == std::string::npos) return std::nullopt;
+        const std::string tail{ userText.substr(inside) };
+        static const std::regex filePattern{
+            R"(\b([A-Za-z0-9_-]+\.(?:cpp|cxx|cc|c|h|hpp|py|txt|md))\b)",
+            std::regex::icase };
+        std::sregex_iterator match{ tail.begin(), tail.end(), filePattern };
+        if (match == std::sregex_iterator{}) return std::nullopt;
+        const std::string filename = (*match)[1].str();
+        if (++match != std::sregex_iterator{}) return std::nullopt;
+
+        std::string directory = *parent;
+        if (!directory.empty() && directory.back() != '\\' && directory.back() != '/')
+            directory += '\\';
+        directory += folder;
+        tools::ToolRequest request{
+            .toolId = "create_directory_with_text_file",
+            .arguments = { { "directory_path", directory },
+                { "path", directory + "\\" + filename },
+                { "content_format", "literal" } }
+        };
+        // A headerless shell is a minimal compilable entry point. Other blank
+        // file requests create an empty file, with no model-generated additions.
+        if (asciiLower(filename) == "main.cpp"
+            && lower.find("no headers") != std::string::npos)
+            request.arguments.emplace("content", "int main() {\n    return 0;\n}\n");
+        return request;
+    }
+
+
+    bool CapabilityRoutingGuard::explicitFilesystemMutationRequest(
+        const std::string_view userText)
+    {
+        const std::string lower = asciiLower(userText);
+        if (lower.find("how to ") != std::string::npos
+            || lower.find("how do i ") != std::string::npos
+            || lower.find("show me how") != std::string::npos
+            || lower.find("do not create") != std::string::npos
+            || lower.find("don't create") != std::string::npos
+            || lower.find("do not write") != std::string::npos
+            || lower.find("don't write") != std::string::npos)
+            return false;
+        return containsAnyAsciiWord(lower, { "create", "save", "output", "write" })
+            && (containsAnyAsciiWord(lower, { "file", "folder", "directory", "pdf" })
+                || looksLikeAbsoluteWindowsPath(userText));
+    }
+
+
     namespace
     {
         struct PdfPageWindow
@@ -2133,7 +2259,8 @@ namespace rose::agent
             }
             return request;
         }
-        if (references.size() < 2u || references.size() > 4u
+        if (references.size() < 2u
+            || references.size() > static_cast<std::size_t>(tools::maximumNamedPdfFiles)
             || !toolRegistered(toolRegistry, "read_named_pdfs"))
         {
             return std::nullopt;
@@ -2167,6 +2294,16 @@ namespace rose::agent
         const std::span<const std::string_view> completedToolIds,
         const std::string_view agentContext)
     {
+        if (!completedTool(completedToolIds, "create_directory_with_text_file"))
+        {
+            if (auto folder = explicitNewFolderAndFileRequest(userText, toolRegistry))
+                return folder;
+        }
+        if (!completedTool(completedToolIds, "search_online"))
+        {
+            if (auto search = explicitOnlineSearchRequest(userText, toolRegistry))
+                return search;
+        }
         if (!completedTool(completedToolIds, "read_named_pdfs")
             && !completedTool(completedToolIds, "read_pdf"))
         {

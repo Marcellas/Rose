@@ -1131,7 +1131,11 @@ namespace rose::model
                     std::string{ "[" }
                     + role
                     + "]\n"
-                    + message.content);
+                    + message.content.substr(0, 1024)
+                    + (message.content.size() > 1024
+                        ? "\n[model message truncated in verbose log; bytes="
+                            + std::to_string(message.content.size()) + "]"
+                        : ""));
             }
 
             // ---------------------------------------------------------------------

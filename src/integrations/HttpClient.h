@@ -1,6 +1,7 @@
 #pragma once
 
 #include <string>
+#include <cstddef>
 #include <utility>
 #include <vector>
 
@@ -18,6 +19,8 @@ namespace rose::integrations
         std::string url;
         std::vector<HttpHeader> headers;
         std::string body;
+        std::size_t maximumResponseBytes{ 0 }; // 0 uses the integration's default.
+        int timeoutMilliseconds{ 0 }; // 0 uses the integration's default.
     };
 
     struct HttpResponse

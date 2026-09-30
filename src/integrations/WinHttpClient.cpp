@@ -102,7 +102,9 @@ namespace rose::integrations
             L"Rose/0.1", WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY,
             WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0) };
         if (!session.value) fail("WinHttpOpen");
-        WinHttpSetTimeouts(session.value, 10000, 10000, 15000, 15000);
+        const int timeout = request.timeoutMilliseconds > 0
+            ? request.timeoutMilliseconds : 15000;
+        WinHttpSetTimeouts(session.value, 10000, 10000, timeout, timeout);
 
         Handle connection{ WinHttpConnect(session.value, host.c_str(), components.nPort, 0) };
         if (!connection.value) fail("WinHttpConnect");
@@ -158,6 +160,9 @@ namespace rose::integrations
             DWORD available = 0;
             if (!WinHttpQueryDataAvailable(requestHandle.value, &available)) fail("WinHttpQueryDataAvailable");
             if (available == 0) break;
+            if (request.maximumResponseBytes != 0
+                && available > request.maximumResponseBytes - responseBody.size())
+                throw std::runtime_error{ "HTTP response exceeded the configured byte limit." };
             const std::size_t oldSize = responseBody.size();
             responseBody.resize(oldSize + available);
             DWORD read = 0;
